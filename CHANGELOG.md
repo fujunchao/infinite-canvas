@@ -2,6 +2,9 @@
 
 ## Unreleased
 
++ [调整] README 和 Docker Compose 部署文档改用当前 fork 的 GHCR 镜像。
++ [修复] 修复主应用 Docker 镜像构建时 `/canvas` 预渲染失败的问题。
+
 ## v0.4.1 - 2026-07-01
 
 + [新增] 渠道兼容Gemini格式。

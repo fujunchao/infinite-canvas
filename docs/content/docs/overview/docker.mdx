@@ -10,9 +10,15 @@ description: 使用 Docker Compose 部署无限画布
 ## 使用发布镜像
 
 ```bash
-git clone git@github.com:basketikun/infinite-canvas.git
+git clone git@github.com:fujunchao/infinite-canvas.git
 cd infinite-canvas
 docker compose up -d
+```
+
+默认使用当前 fork 发布到 GHCR 的主应用镜像：
+
+```text
+ghcr.io/fujunchao/infinite-canvas:latest
 ```
 
 启动后访问：
@@ -38,6 +44,12 @@ docker compose -f docker-compose.local.yml up -d --build
 ```bash
 cd docs
 docker compose up -d
+```
+
+文档站 Compose 默认使用：
+
+```text
+ghcr.io/fujunchao/infinite-canvas-docs:latest
 ```
 
 基于当前源码本地构建：
