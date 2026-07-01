@@ -8,6 +8,7 @@ import { FileText, Image as ImageIcon, Music2, Video } from "lucide-react";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasResourceReference } from "../utils/canvas-resource-references";
+import { getMentionOverlayLabels } from "./canvas-resource-mention-textarea-utils";
 
 type MentionState = {
     start: number;
@@ -30,6 +31,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     const [mention, setMention] = useState<MentionState | null>(null);
     const [activeIndex, setActiveIndex] = useState(0);
     const [hasSelection, setHasSelection] = useState(false);
+    const [isComposing, setIsComposing] = useState(false);
     const candidates = useMemo(() => {
         if (!mention) return [];
         const query = mention.query.trim().toLowerCase();
@@ -85,12 +87,13 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
         setHasSelection(Boolean(textarea && textarea.selectionStart !== textarea.selectionEnd));
     };
 
-    const showOverlay = Boolean(activeLabels.length && !hasSelection);
+    const overlayLabels = useMemo(() => getMentionOverlayLabels(value, activeLabels, hasSelection, isComposing), [activeLabels, hasSelection, isComposing, value]);
+    const showOverlay = Boolean(overlayLabels.length);
     const mergedStyle = {
         ...(style || {}),
         color: showOverlay ? "transparent" : style?.color,
         caretColor: style?.color || theme.node.text,
-        ...(showOverlay ? { background: "transparent", backgroundColor: "transparent" } : {}),
+        ...(showOverlay ? { position: "relative", zIndex: 1, background: "transparent", backgroundColor: "transparent" } : {}),
     } as CSSProperties;
     const menu = mention && candidates.length && textareaRef.current ? <MentionMenu textarea={textareaRef.current} references={candidates} activeIndex={Math.min(activeIndex, candidates.length - 1)} theme={theme} onSelect={insertReference} /> : null;
 
@@ -98,7 +101,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
         <div className={`relative h-full w-full ${containerClassName || ""}`}>
             {showOverlay ? (
                 <div ref={overlayRef} className={`${className || ""} pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words`} style={{ ...style, color: theme.node.text }}>
-                    <MentionHighlightText value={value || props.placeholder?.toString() || ""} labels={activeLabels} placeholder={!value} />
+                    <MentionHighlightText value={value} labels={overlayLabels} />
                 </div>
             ) : null}
             <textarea
@@ -162,6 +165,15 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     }
                     onKeyDown?.(event);
                 }}
+                onCompositionStart={(event) => {
+                    setIsComposing(true);
+                    props.onCompositionStart?.(event);
+                }}
+                onCompositionEnd={(event) => {
+                    setIsComposing(false);
+                    syncMention(event.currentTarget.value, event.currentTarget.selectionStart);
+                    props.onCompositionEnd?.(event);
+                }}
                 onScroll={(event) => {
                     syncOverlayScroll();
                     props.onScroll?.(event);
@@ -177,8 +189,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
     );
 });
 
-function MentionHighlightText({ value, labels, placeholder }: { value: string; labels: string[]; placeholder: boolean }) {
-    if (placeholder) return <span className="opacity-45">{value}</span>;
+function MentionHighlightText({ value, labels }: { value: string; labels: string[] }) {
     if (!labels.length) return <>{value}</>;
     const pattern = new RegExp(`(${labels.map(escapeRegExp).join("|")})`, "g");
     return (
