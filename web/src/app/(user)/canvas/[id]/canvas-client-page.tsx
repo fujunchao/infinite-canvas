@@ -20,6 +20,7 @@ import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "../utils/canvas-image-data";
+import { resolveCanvasImageSource } from "../utils/canvas-image-source";
 import { fitNodeSize, nodeSizeFromRatio } from "../utils/canvas-node-size";
 import { App, Button, Dropdown, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "../constants";
@@ -73,6 +74,15 @@ type CanvasClipboard = {
 type PendingConnectionCreate = {
     connection: ConnectionHandle;
     position: Position;
+};
+
+type CanvasImageInsertInput = CanvasAssistantImage & {
+    coverUrl?: string;
+    url?: string;
+    width?: number;
+    height?: number;
+    bytes?: number;
+    mimeType?: string;
 };
 
 type ConnectionDropTarget = {
@@ -2408,28 +2418,31 @@ function InfiniteCanvasPage() {
     );
 
     const insertAssistantImage = useCallback(
-        async (image: CanvasAssistantImage) => {
-            const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadImage(image.dataUrl);
-            const meta = storedImage.width === 1 && storedImage.height === 1 ? await readImageMeta(storedImage.url) : storedImage;
-            const config = fitNodeSize(meta.width, meta.height);
-            const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
-            const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-            const node: CanvasNodeData = {
-                id,
-                type: CanvasNodeType.Image,
-                title: image.prompt.slice(0, 32) || "Generated Image",
-                position: { x: center.x - config.width / 2, y: center.y - config.height / 2 },
-                width: config.width,
-                height: config.height,
-                metadata: { ...imageMetadata({ ...storedImage, width: meta.width, height: meta.height }), prompt: image.prompt },
-            };
+        async (image: CanvasImageInsertInput) => {
+            try {
+                const storedImage = await resolveCanvasImageSource(image, { resolveImageUrl, uploadImage, readImageMeta });
+                const config = fitNodeSize(storedImage.width, storedImage.height);
+                const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
+                const id = `image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                const node: CanvasNodeData = {
+                    id,
+                    type: CanvasNodeType.Image,
+                    title: image.prompt.slice(0, 32) || "Generated Image",
+                    position: { x: center.x - config.width / 2, y: center.y - config.height / 2 },
+                    width: config.width,
+                    height: config.height,
+                    metadata: { ...imageMetadata(storedImage), prompt: image.prompt },
+                };
 
-            setNodes((prev) => [...prev, node]);
-            setSelectedNodeIds(new Set([id]));
-            setSelectedConnectionId(null);
-            setDialogNodeId(id);
+                setNodes((prev) => [...prev, node]);
+                setSelectedNodeIds(new Set([id]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(id);
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : "图片插入失败");
+            }
         },
-        [screenToCanvas, size.height, size.width],
+        [message, screenToCanvas, size.height, size.width],
     );
 
     const insertAssistantText = useCallback(
@@ -2459,7 +2472,7 @@ function InfiniteCanvasPage() {
                 setNodes((prev) => [...prev, { id, type: CanvasNodeType.Video, title: payload.title, position: { x: center.x - nextSize.width / 2, y: center.y - nextSize.height / 2 }, width: nextSize.width, height: nextSize.height, metadata: { content: payload.url, storageKey: payload.storageKey, status: NODE_STATUS_SUCCESS, naturalWidth: payload.width, naturalHeight: payload.height } }]);
                 setSelectedNodeIds(new Set([id]));
             } else {
-                insertAssistantImage({ id: `asset-${Date.now()}`, prompt: payload.title, dataUrl: payload.dataUrl, storageKey: payload.storageKey });
+                insertAssistantImage({ id: `asset-${Date.now()}`, prompt: payload.title, dataUrl: payload.dataUrl, coverUrl: payload.coverUrl, storageKey: payload.storageKey, width: payload.width, height: payload.height, bytes: payload.bytes, mimeType: payload.mimeType });
             }
             setAssetPickerOpen(false);
         },

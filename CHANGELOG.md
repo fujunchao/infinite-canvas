@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## v0.4.2 - 2026-07-01
+
++ [修复] 修复图片素材带有 `storageKey` 但展示 URL 为空时，从素材插入画布会生成空图片节点的问题。
++ [调整] 应用和文档界面的 GitHub 仓库入口改为当前 fork 仓库。
 + [调整] README 和 Docker Compose 部署文档改用当前 fork 的 GHCR 镜像。
 + [修复] 修复主应用 Docker 镜像构建时 `/canvas` 预渲染失败的问题。
 
