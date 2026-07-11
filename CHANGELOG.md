@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.6.1 - 2026-07-11
+
 + [调整] 同步上游 `v0.6.0`，前端迁移到 Vite + React Router，Docker 改为 nginx 静态托管。
 + [调整] 保留 fork 仓库的 GHCR、Docker Compose、GitHub 链接和版本检查配置。
 + [修复] 将图片素材空节点修复迁移到 Vite 画布目录。
