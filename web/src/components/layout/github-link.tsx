@@ -1,5 +1,3 @@
-"use client";
-
 import { GithubOutlined } from "@ant-design/icons";
 
 import { APP_REPOSITORY_URL } from "@/constant/env";

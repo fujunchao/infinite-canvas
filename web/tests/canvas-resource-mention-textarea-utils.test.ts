@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { getMentionOverlayLabels } from "../src/app/(user)/canvas/components/canvas-resource-mention-textarea-utils";
+import { getMentionOverlayLabels } from "../src/components/canvas/canvas-resource-mention-textarea-utils";
 
 describe("getMentionOverlayLabels", () => {
     test("空输入和普通文本不启用覆盖层", () => {

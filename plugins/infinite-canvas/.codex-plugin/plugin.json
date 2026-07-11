@@ -5,7 +5,7 @@
   "author": {
     "name": "Infinite Canvas"
   },
-  "repository": "https://github.com/basketikun/infinite-canvas",
+  "repository": "https://github.com/fujunchao/infinite-canvas",
   "license": "AGPL-3.0",
   "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
   "skills": "./skills/",

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveCanvasImageSource } from "../src/app/(user)/canvas/utils/canvas-image-source";
+import { resolveCanvasImageSource } from "../src/lib/canvas/canvas-image-source";
 
 describe("resolveCanvasImageSource", () => {
     test("storageKey 存在且 dataUrl 为空时解析出可显示 URL", async () => {
