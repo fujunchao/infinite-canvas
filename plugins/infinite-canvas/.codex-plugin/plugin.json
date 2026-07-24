@@ -3,8 +3,10 @@
   "version": "0.1.0",
   "description": "Use Codex to read and operate Infinite Canvas through the local Canvas Agent MCP server.",
   "author": {
-    "name": "Infinite Canvas"
+    "name": "Infinite Canvas",
+    "url": "https://github.com/fujunchao/infinite-canvas"
   },
+  "homepage": "https://github.com/fujunchao/infinite-canvas",
   "repository": "https://github.com/fujunchao/infinite-canvas",
   "license": "AGPL-3.0",
   "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
@@ -17,6 +19,7 @@
     "developerName": "Infinite Canvas",
     "category": "Productivity",
     "capabilities": ["Canvas", "MCP", "Creative Workflow"],
+    "websiteURL": "https://github.com/fujunchao/infinite-canvas",
     "defaultPrompt": [
       "打开 Infinite Canvas",
       "读取当前画布并总结节点结构",

@@ -61,13 +61,27 @@ codex plugin add infinite-canvas@personal
 
 ### 本仓库开发调试
 
-如果你就在 Infinite Canvas 仓库中调试插件，可以直接添加仓库自带 marketplace。建议使用仓库绝对路径，避免 Codex 从其他工作目录解析失败：
+如果你就在 Infinite Canvas 仓库中调试插件，可以直接添加仓库自带 marketplace。建议使用仓库绝对路径，避免 Codex 从其他工作目录解析失败。
+
+macOS / Linux：
 
 ```bash
-cd /path/to/infinite-canvas
+git clone https://github.com/fujunchao/infinite-canvas.git
+cd infinite-canvas
 codex plugin marketplace add "$(pwd)"
 codex plugin add infinite-canvas@infinite-canvas-local
 ```
+
+Windows PowerShell：
+
+```powershell
+git clone https://github.com/fujunchao/infinite-canvas.git
+cd infinite-canvas
+codex plugin marketplace add "$PWD"
+codex plugin add infinite-canvas@infinite-canvas-local
+```
+
+Windows CMD 将 `$PWD` 替换为 `%cd%`。
 
 ## 使用
 

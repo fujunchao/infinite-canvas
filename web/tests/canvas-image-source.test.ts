@@ -33,6 +33,19 @@ describe("resolveCanvasImageSource", () => {
         expect(image).toMatchObject({ url: "blob:new", storageKey: "image:new", width: 1024, height: 1024, bytes: 2048, mimeType: "image/png" });
     });
 
+    test("storageKey 失效时使用备用封面地址重新存储", async () => {
+        const image = await resolveCanvasImageSource(
+            { dataUrl: "", coverUrl: "https://example.com/cover.png", storageKey: "image:missing" },
+            {
+                resolveImageUrl: async () => "",
+                uploadImage: async (input) => ({ url: "blob:restored", storageKey: "image:restored", width: 800, height: 600, bytes: 1024, mimeType: "image/png", input }),
+                readImageMeta: async () => ({ width: 1, height: 1, mimeType: "image/png" }),
+            },
+        );
+
+        expect(image).toMatchObject({ url: "blob:restored", storageKey: "image:restored", width: 800, height: 600 });
+    });
+
     test("缺少图片来源时给出明确错误", async () => {
         await expect(
             resolveCanvasImageSource(

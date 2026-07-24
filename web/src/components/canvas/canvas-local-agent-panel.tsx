@@ -1,26 +1,28 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { App, Button, Input, Segmented, Tooltip } from "antd";
 import copyToClipboard from "copy-to-clipboard";
-import { Copy, FolderOpen, History, KeyRound, Link2, LoaderCircle, PlugZap, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
-import { motion } from "motion/react";
+import { Copy, FolderOpen, History, KeyRound, Link2, LoaderCircle, PlugZap, Plus, RefreshCw, Square, Terminal, Trash2 } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { randomId } from "@/lib/utils";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
-import { useCanvasAgentStore, type AgentAttachment, type AgentChatItem, type AgentEventLog, type AgentPanelTab, type AgentPendingToolCall, type AgentThreadSummary } from "@/stores/canvas/use-canvas-agent-store";
+import { useShallow } from "zustand/react/shallow";
+import { useAgentStore, type AgentAttachment, type AgentCanvasContext, type AgentChatItem, type AgentEventLog, type AgentPanelTab, type AgentPendingToolCall, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { summarizeCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
+import { isSiteTool, runSiteTool, SITE_TOOL_LABELS } from "@/lib/agent/agent-site-tools";
 import { AgentChatComposer, AgentChatMessage, AgentPanelTabs, AgentPendingToolCard, AgentWorkingMessage, type CanvasAgentChatAttachment } from "./canvas-agent-chat-ui";
 
-const PANEL_MOTION_SECONDS = 0.5;
 const MAX_ATTACHMENTS = 6;
 const MAX_ATTACHMENT_PAYLOAD_BYTES = 28 * 1024 * 1024;
 const DEFAULT_AGENT_URL = "http://127.0.0.1:17371";
 const AGENT_CONNECT_STEPS = [
-    { title: "安装 Codex 插件", text: "在 Codex app 安装 Infinite Canvas 插件后，首次使用插件会自动启动本地 Agent。" },
-    { title: "打开画布连接", text: "回到这里点击连接，网页会自动读取本机 Agent 配置。" },
-    { title: "手动启动备用", text: "如果自动发现失败，再运行下面命令。", command: "npx -y @basketikun/canvas-agent" },
+    { title: "方式一：在 Codex 中使用插件", text: "在 Codex app 安装 Infinite Canvas 插件后，通过插件启动画布，插件会自动启动本地 Agent 并带上连接信息。" },
+    { title: "方式二：直接运行 Agent", text: "不使用 Codex 插件时，在终端运行下面命令，再回到网页里连接或手动填入 Local URL 和 Connect token。", command: "npx -y @basketikun/canvas-agent" },
 ];
+const AGENT_PLUGIN_REMOVE_COMMAND = "codex plugin remove infinite-canvas";
+const AGENT_MCP_REMOVE_COMMAND = "codex mcp remove infinite-canvas";
 
 type AgentEventPayload = {
     agent?: string;
@@ -34,36 +36,65 @@ type AgentEventPayload = {
 type AgentEventItem = { id?: string; type?: string; text?: unknown; message?: unknown; server?: string; tool?: string; status?: string; arguments?: unknown; result?: unknown; error?: { message?: string } };
 
 type AgentLogContext = { endpoint: string; connected: boolean; enabled: boolean; activity: string; waiting: boolean; sending: boolean; messages: number; pendingTool?: string };
-type AgentWorkspace = { canvasId: string; workspacePath: string; activeThreadId?: string };
+type AgentWorkspace = { workspacePath: string; activeThreadId?: string };
 type AgentThreadsResponse = { ok?: boolean; workspace?: AgentWorkspace; data?: AgentThreadSummary[] };
 type AgentThreadResponse = { ok?: boolean; workspace?: AgentWorkspace; thread?: AgentThreadSummary; messages?: AgentChatItem[] };
 type AgentConfigResponse = { ok?: boolean; url?: string; token?: string; hasToken?: boolean };
 
-export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedded, headless, autoConnect, onApplyOps, onUndoOps }: { snapshot: CanvasAgentSnapshot; canUndoOps: boolean; collapsed?: boolean; embedded?: boolean; headless?: boolean; autoConnect?: boolean; onApplyOps: (ops: CanvasAgentOp[]) => unknown; onUndoOps: () => CanvasAgentSnapshot | null }) {
+export function CanvasLocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const user = useUserStore((state) => state.user);
     const { message, modal } = App.useApp();
     const [searchParams] = useSearchParams();
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, messages, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, activity, connectError, pendingTool, setAgentState, addMessage: pushMessage, addEventLog: pushEventLog, clearEventLogs } = useCanvasAgentStore();
-    const [resizing, setResizing] = useState(false);
+    const navigate = useNavigate();
+    // 逐字段 selector + useShallow：只有这些字段变化时才重渲染。
+    // 注意：canvasContext 不在此订阅内 —— 它在拖拽/resize 时会被 project 每帧写入，
+    // 但面板只在 ref 同步与防抖 postState 中用到它、渲染层从不读它。若把它放进订阅，
+    // 面板会随画布每帧重渲染（性能问题，也是 #185 崩溃的放大器）。改为下方 subscribe 命令式监听。
+    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, messages, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, activity, connectError, pendingTool } = useAgentStore(
+        useShallow((state) => ({
+            width: state.width,
+            url: state.url,
+            token: state.token,
+            connected: state.connected,
+            enabled: state.enabled,
+            prompt: state.prompt,
+            attachments: state.attachments,
+            sending: state.sending,
+            waiting: state.waiting,
+            messages: state.messages,
+            eventLogs: state.eventLogs,
+            threads: state.threads,
+            activeThreadId: state.activeThreadId,
+            workspacePath: state.workspacePath,
+            loadingThreads: state.loadingThreads,
+            activeTab: state.activeTab,
+            confirmTools: state.confirmTools,
+            activity: state.activity,
+            connectError: state.connectError,
+            pendingTool: state.pendingTool,
+        })),
+    );
+    const setAgentState = useAgentStore((state) => state.setAgentState);
+    const pushMessage = useAgentStore((state) => state.addMessage);
+    const pushEventLog = useAgentStore((state) => state.addEventLog);
+    const clearEventLogs = useAgentStore((state) => state.clearEventLogs);
     const listRef = useRef<HTMLDivElement>(null);
-    const snapshotRef = useRef(snapshot);
+    const canvasContextRef = useRef<AgentCanvasContext | null>(useAgentStore.getState().canvasContext);
     const confirmToolsRef = useRef(confirmTools);
     const pendingToolRef = useRef<AgentPendingToolCall | null>(null);
-    const onApplyOpsRef = useRef(onApplyOps);
     const autoConnectRef = useRef(false);
     const connectedRef = useRef(false);
     const errorLoggedRef = useRef(false);
     const attachmentUrlsRef = useRef(new Set<string>());
-    const clientIdRef = useRef(typeof crypto === "undefined" ? `${Date.now()}` : crypto.randomUUID());
+    const clientIdRef = useRef(randomId());
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
     const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
     const loadThreads = useCallback(async () => {
-        const projectId = snapshotRef.current.projectId;
-        if ((!connectedRef.current && !useCanvasAgentStore.getState().connected) || !projectId) return;
+        if (!connectedRef.current && !useAgentStore.getState().connected) return;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/agent/codex/threads?canvasId=${encodeURIComponent(projectId)}`);
+            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/agent/codex/threads`);
             const nextThreadId = data.workspace?.activeThreadId || "";
             setAgentState({
                 threads: data.data || [],
@@ -72,7 +103,7 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
                 messages: [],
             });
             if (nextThreadId) {
-                const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}?canvasId=${encodeURIComponent(projectId)}`);
+                const thread = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(nextThreadId)}`);
                 setAgentState({ messages: normalizeHistoryMessages(thread.messages || []) });
             }
         } catch (error) {
@@ -82,18 +113,27 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         }
     }, [endpoint, setAgentState, token]);
 
+    // canvasContext 命令式订阅：保持 ref 最新，并在快照变化时防抖上报，全程不触发面板重渲染。
     useEffect(() => {
-        snapshotRef.current = snapshot;
-    }, [snapshot]);
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribe = useAgentStore.subscribe((state) => {
+            if (state.canvasContext === canvasContextRef.current) return;
+            canvasContextRef.current = state.canvasContext;
+            if (!useAgentStore.getState().connected) return;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => void postState(endpoint, token, clientIdRef.current, canvasContextRef.current?.snapshot || null), 300);
+        });
+        return () => {
+            unsubscribe();
+            if (timer) clearTimeout(timer);
+        };
+    }, [endpoint, token]);
     useEffect(() => {
         confirmToolsRef.current = confirmTools;
     }, [confirmTools]);
     useEffect(() => {
         pendingToolRef.current = pendingTool;
     }, [pendingTool]);
-    useEffect(() => {
-        onApplyOpsRef.current = onApplyOps;
-    }, [onApplyOps]);
     useEffect(() => {
         listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
     }, [messages, pendingTool, waiting]);
@@ -108,9 +148,9 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         source.addEventListener("hello", () => {
             errorLoggedRef.current = false;
             connectedRef.current = true;
-            setAgentState({ connected: true, activity: "已连接", connectError: "", messages: useCanvasAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)) });
+            setAgentState({ connected: true, activity: "已连接", connectError: "", silentConnect: false, messages: useAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)) });
             if (!headless) message.success("本地 Agent 已连接");
-            void postState(endpoint, token, clientId, snapshotRef.current);
+            void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
         });
         source.addEventListener("tool_call", (event) => {
             const data = parseEventData<AgentPendingToolCall>(event);
@@ -136,14 +176,15 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         });
         source.onerror = () => {
             const wasConnected = connectedRef.current;
+            const silent = useAgentStore.getState().silentConnect && !wasConnected;
             const text = wasConnected ? "本地 Agent 连接失败或已断开" : "连接失败，请检查地址和 token";
             if (!errorLoggedRef.current || wasConnected) {
                 addEventLog(wasConnected ? "连接断开" : "连接失败", { endpoint, error: text });
-                if (!headless) message.error(text);
+                if (!headless && !silent) message.error(text);
             }
             errorLoggedRef.current = true;
             connectedRef.current = false;
-            clearAgentSession({ activity: wasConnected ? "连接断开" : "连接失败", connected: false, connectError: text });
+            clearAgentSession({ activity: wasConnected ? "连接断开" : "连接失败", connected: false, connectError: silent ? "" : text, silentConnect: false });
             if (!wasConnected) {
                 source.close();
                 setAgentState({ enabled: false });
@@ -159,17 +200,6 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         if (connected) void loadThreads();
     }, [connected, loadThreads]);
 
-    useEffect(() => {
-        clearAgentSession({ activity: connected ? "切换画布" : activity });
-        if (connected) void loadThreads();
-    }, [snapshot.projectId]);
-
-    useEffect(() => {
-        if (!connected) return;
-        const timer = setTimeout(() => void postState(endpoint, token, clientIdRef.current, snapshot), 300);
-        return () => clearTimeout(timer);
-    }, [connected, endpoint, snapshot, token]);
-
     const sendPrompt = async () => {
         const text = prompt.trim();
         const files = attachments;
@@ -183,7 +213,11 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         addMessage({ role: "user", text: text || "发送了图片", attachments: files });
         addEventLog("用户发送", { text, attachments: files.map(({ name, type, size }) => ({ name, type, size })) });
         try {
-            const res = await fetch(`${endpoint}/agent/codex/turn?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: requestPrompt, canvasId: snapshotRef.current.projectId, threadId: useCanvasAgentStore.getState().activeThreadId || undefined, attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })) }) });
+            const res = await fetch(`${endpoint}/agent/codex/turn?token=${encodeURIComponent(token)}`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ prompt: requestPrompt, threadId: useAgentStore.getState().activeThreadId || undefined, attachments: files.map(({ name, type, dataUrl }) => ({ name, type, dataUrl })) }),
+            });
             if (!res.ok) throw new Error("本地 Agent 拒绝了请求");
             const data = (await res.json()) as { threadId?: string };
             if (data.threadId) setAgentState({ activeThreadId: data.threadId });
@@ -202,17 +236,31 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         }
     };
 
+    const stopTurn = async () => {
+        if (!connected || (!sending && !waiting)) return;
+        setAgentState({ activity: "停止中" });
+        try {
+            await fetch(`${endpoint}/agent/codex/interrupt?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" } });
+            setAgentState({ activity: "已停止", sending: false, waiting: false });
+            addEventLog("用户停止", {});
+        } catch {
+            setAgentState({ activity: "就绪", sending: false, waiting: false });
+        }
+    };
+
     const addAttachments = async (files: FileList | File[] | null) => {
         if (!files) return;
         const images = Array.from(files).filter((file) => file.type.startsWith("image/"));
-        const prev = useCanvasAgentStore.getState().attachments;
+        const prev = useAgentStore.getState().attachments;
         try {
-            const next = await Promise.all(images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
-                const dataUrl = await readDataUrl(file);
-                const url = URL.createObjectURL(file);
-                attachmentUrlsRef.current.add(url);
-                return { id: createId(), name: file.name, type: file.type, size: file.size, url, dataUrl };
-            }));
+            const next = await Promise.all(
+                images.slice(0, Math.max(0, MAX_ATTACHMENTS - prev.length)).map(async (file) => {
+                    const dataUrl = await readDataUrl(file);
+                    const url = URL.createObjectURL(file);
+                    attachmentUrlsRef.current.add(url);
+                    return { id: createId(), name: file.name, type: file.type, size: file.size, url, dataUrl };
+                }),
+            );
             const merged = [...prev, ...next];
             if (attachmentPayloadBytes(merged) > MAX_ATTACHMENT_PAYLOAD_BYTES) {
                 next.forEach((item) => {
@@ -252,16 +300,51 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     };
 
     const runToolCall = async (endpoint: string, token: string, payload: AgentPendingToolCall) => {
+        if (isSiteTool(payload.name)) {
+            try {
+                setAgentState({ activity: SITE_TOOL_LABELS[payload.name], waiting: true });
+                addEventLog(toolName(payload.name), payload, payload);
+                const result = await runSiteTool(payload.name, payload.input || {}, navigate);
+                await postToolResult(endpoint, token, clientIdRef.current, { requestId: payload.requestId, result });
+                setAgentState({ activity: "工具完成", waiting: true });
+                addEventLog(`${toolName(payload.name)}完成`, result, result);
+                addMessage({ role: "tool", title: `${toolName(payload.name)}完成`, text: siteToolSummary(payload.name, result), detail: { requestId: payload.requestId, name: payload.name, input: payload.input, result } });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : "工具执行失败";
+                setAgentState({ activity: "工具失败", waiting: false });
+                addMessage({ role: "tool", title: "工具失败", text: message, detail: payload });
+                await postToolResult(endpoint, token, clientIdRef.current, { requestId: payload.requestId, error: message });
+            }
+            return;
+        }
         try {
-            const input: { ops?: CanvasAgentOp[] } = payload.input || {};
-            setAgentState({ activity: payload.name === "canvas_apply_ops" ? "执行画布操作" : "读取画布", waiting: true });
+            const input: { ops?: CanvasAgentOp[]; path?: string } = payload.input || {};
+            setAgentState({ activity: payload.name === "canvas_apply_ops" ? "执行画布操作" : payload.name === "site_navigate" ? "跳转页面" : "读取画布", waiting: true });
             addEventLog(toolName(payload.name), payload, payload);
-            const result = payload.name === "canvas_apply_ops" ? onApplyOpsRef.current(input.ops || []) : snapshotRef.current;
+            let result: unknown;
+            if (payload.name === "site_navigate") {
+                const path = input.path || "/";
+                navigate(path);
+                result = { ok: true, path };
+            } else if (payload.name === "canvas_apply_ops") {
+                const context = canvasContextRef.current;
+                if (!context) throw new Error("当前不在画布页，请先用 site_navigate 打开画布");
+                result = context.applyOps(input.ops || []);
+                void postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
+            } else {
+                const snapshot = canvasContextRef.current?.snapshot;
+                if (!snapshot) throw new Error("当前不在画布页，请先用 site_navigate 打开画布");
+                result = snapshot;
+            }
             await postToolResult(endpoint, token, clientIdRef.current, { requestId: payload.requestId, result });
-            if (payload.name === "canvas_apply_ops") void postState(endpoint, token, clientIdRef.current, result as CanvasAgentSnapshot);
             setAgentState({ activity: "工具完成", waiting: true });
             addEventLog(`${toolName(payload.name)}完成`, result, result);
-            addMessage({ role: "tool", title: `${toolName(payload.name)}完成`, text: payload.name === "canvas_apply_ops" ? summarizeCanvasAgentOps(input.ops || []) || "画布操作" : "已完成", detail: { requestId: payload.requestId, name: payload.name, input, result } });
+            addMessage({
+                role: "tool",
+                title: `${toolName(payload.name)}完成`,
+                text: payload.name === "canvas_apply_ops" ? summarizeCanvasAgentOps(input.ops || []) || "画布操作" : payload.name === "site_navigate" ? `已跳转到 ${input.path || "/"}` : "已完成",
+                detail: { requestId: payload.requestId, name: payload.name, input, result },
+            });
         } catch (error) {
             const message = error instanceof Error ? error.message : "画布操作失败";
             setAgentState({ activity: "工具失败", waiting: false });
@@ -287,15 +370,7 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         await runToolCall(endpoint, token, tool);
     };
 
-    const undoLastTool = () => {
-        const restored = onUndoOps();
-        if (!restored) return;
-        setAgentState({ activity: "已撤销" });
-        addMessage({ role: "tool", title: "已撤销", text: "上一次工具操作", detail: restored });
-        if (connected) void postState(endpoint, token, clientIdRef.current, restored);
-    };
-
-    const toggleAgentConnection = async () => {
+    const toggleAgentConnection = async ({ silent = false }: { silent?: boolean } = {}) => {
         if (enabled) {
             clearAgentSession({ enabled: false, connected: false, activity: "离线", connectError: "" });
             return;
@@ -307,14 +382,18 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         const nextToken = (urlToken || token.trim() || discovered?.token || "").trim();
         if (!nextEndpoint) {
             const text = "请填写本地 Agent 地址";
-            setAgentState({ connectError: text });
-            if (!headless) message.warning(text);
+            if (!silent) {
+                setAgentState({ connectError: text });
+                if (!headless) message.warning(text);
+            }
             return;
         }
         if (!nextToken) {
             const text = "没有发现本地 Agent，请先在 Codex 使用插件或手动启动 Canvas Agent";
-            setAgentState({ connectError: text });
-            if (!headless) message.warning(text);
+            if (!silent) {
+                setAgentState({ connectError: text });
+                if (!headless) message.warning(text);
+            }
             return;
         }
         try {
@@ -322,12 +401,14 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
             if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("invalid protocol");
         } catch {
             const text = "本地 Agent 地址格式不正确";
-            setAgentState({ connectError: text });
-            if (!headless) message.warning(text);
+            if (!silent) {
+                setAgentState({ connectError: text });
+                if (!headless) message.warning(text);
+            }
             return;
         }
         errorLoggedRef.current = false;
-        setAgentState({ url: nextEndpoint, token: nextToken, enabled: true, connected: false, activity: "连接中", connectError: "", activeTab: "setup" });
+        setAgentState({ url: nextEndpoint, token: nextToken, enabled: true, connected: false, silentConnect: silent, activity: "连接中", connectError: "", activeTab: "setup" });
     };
 
     useEffect(() => {
@@ -337,7 +418,7 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     useEffect(() => {
         if (!autoConnect || autoConnectRef.current || enabled || connected) return;
         autoConnectRef.current = true;
-        void toggleAgentConnection();
+        void toggleAgentConnection({ silent: true });
     }, [autoConnect, connected, enabled]);
 
     function clearAgentSession(patch: Parameters<typeof setAgentState>[0] = {}) {
@@ -356,11 +437,10 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     }
 
     const startNewThread = async () => {
-        const projectId = snapshotRef.current.projectId;
-        if (!connected || !projectId) return;
+        if (!connected) return;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, "/agent/codex/threads/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ canvasId: projectId }) });
+            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, "/agent/codex/threads/new", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
             setAgentState({ activeThreadId: data.thread?.id || data.workspace?.activeThreadId || "", messages: [], activeTab: "chat", activity: "新对话" });
             await loadThreads();
         } catch (error) {
@@ -372,11 +452,10 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     };
 
     const resumeThread = async (threadId: string) => {
-        const projectId = snapshotRef.current.projectId;
-        if (!connected || !projectId || !threadId) return;
+        if (!connected || !threadId) return;
         setAgentState({ loadingThreads: true });
         try {
-            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(threadId)}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ canvasId: projectId }) });
+            const data = await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(threadId)}/resume`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
             setAgentState({ activeThreadId: data.thread?.id || threadId, messages: normalizeHistoryMessages(data.messages || []), activeTab: "chat", activity: "已恢复会话" });
             await loadThreads();
         } catch (error) {
@@ -388,12 +467,11 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     };
 
     const deleteThread = async (threadId: string) => {
-        const projectId = snapshotRef.current.projectId;
-        if (!connected || !projectId || !threadId) return;
+        if (!connected || !threadId) return;
         setAgentState({ loadingThreads: true });
         try {
-            await fetchAgentJson(endpoint, token, `/agent/codex/threads/${encodeURIComponent(threadId)}/delete`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ canvasId: projectId }) });
-            const current = useCanvasAgentStore.getState();
+            await fetchAgentJson(endpoint, token, `/agent/codex/threads/${encodeURIComponent(threadId)}/delete`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}) });
+            const current = useAgentStore.getState();
             setAgentState({
                 threads: current.threads.filter((thread) => thread.id !== threadId),
                 activeThreadId: current.activeThreadId === threadId ? "" : current.activeThreadId,
@@ -420,35 +498,15 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         });
     };
 
-    const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-        event.preventDefault();
-        const startX = event.clientX;
-        const startWidth = width;
-        let nextWidth = startWidth;
-        const onMove = (moveEvent: PointerEvent) => {
-            nextWidth = clamp(startWidth + startX - moveEvent.clientX, 360, 760);
-            setAgentState({ width: nextWidth });
-        };
-        const onUp = () => {
-            localStorage.setItem("canvas-agent-panel-width", String(nextWidth));
-            window.removeEventListener("pointermove", onMove);
-            window.removeEventListener("pointerup", onUp);
-            setResizing(false);
-        };
-        setResizing(true);
-        window.addEventListener("pointermove", onMove);
-        window.addEventListener("pointerup", onUp);
-    };
-
     const addMessage = (item: Omit<AgentChatItem, "id">) => {
         const text = normalizeText(item.text);
         if (!text && !item.attachments?.length) return;
         const next = { ...item, id: `${Date.now()}-${Math.random()}`, text };
-        const currentMessages = useCanvasAgentStore.getState().messages;
+        const currentMessages = useAgentStore.getState().messages;
         if (next.streamId) {
             const index = currentMessages.findIndex((message) => message.streamId === next.streamId);
             if (index >= 0) {
-                setAgentState({ messages: currentMessages.map((message, i) => i === index ? { ...message, ...next, id: message.id, text: next.text || message.text } : message) });
+                setAgentState({ messages: currentMessages.map((message, i) => (i === index ? { ...message, ...next, id: message.id, text: next.text || message.text } : message)) });
                 return;
             }
         }
@@ -456,7 +514,7 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
         if (last?.role === "assistant" && next.role === "assistant" && last.title === next.title) {
             const merged = mergeAgentText(last.text, next.text);
             if (merged === last.text) return;
-            setAgentState({ messages: [...useCanvasAgentStore.getState().messages.slice(0, -1), { ...last, text: merged, meta: next.meta || last.meta }] });
+            setAgentState({ messages: [...useAgentStore.getState().messages.slice(0, -1), { ...last, text: merged, meta: next.meta || last.meta }] });
             return;
         }
         pushMessage(next);
@@ -497,8 +555,8 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
                 }}
                 right={
                     <>
-                        <Button size="small" type="text" disabled={!canUndoOps} icon={<RotateCcw className="size-3.5" />} onClick={undoLastTool}>
-                            撤销
+                        <Button size="small" type="text" disabled={!connected || loadingThreads} icon={<Plus className="size-3.5" />} onClick={startNewThread}>
+                            新对话
                         </Button>
                     </>
                 }
@@ -545,7 +603,15 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
                         {messages.map((item) => (
                             <AgentChatMessage key={item.id} item={agentMessageToChatMessage(item)} theme={theme} user={user} />
                         ))}
-                        {pendingTool ? <AgentPendingToolCard summary={summarizeCanvasAgentOps(pendingTool.input?.ops || []) || toolName(pendingTool.name)} detail={{ requestId: pendingTool.requestId, name: pendingTool.name, input: pendingTool.input }} theme={theme} onReject={rejectPendingTool} onApprove={approvePendingTool} /> : null}
+                        {pendingTool ? (
+                            <AgentPendingToolCard
+                                summary={summarizeCanvasAgentOps(pendingTool.input?.ops || []) || toolName(pendingTool.name)}
+                                detail={{ requestId: pendingTool.requestId, name: pendingTool.name, input: pendingTool.input }}
+                                theme={theme}
+                                onReject={rejectPendingTool}
+                                onApprove={approvePendingTool}
+                            />
+                        ) : null}
                         {waiting && !pendingTool ? <AgentWorkingMessage theme={theme} /> : null}
                     </div>
                     <AgentChatComposer
@@ -553,13 +619,20 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
                         attachments={attachments.map(agentAttachmentToChatAttachment)}
                         disabled={!connected}
                         sending={sending || waiting}
-                        placeholder="询问 Codex，或让它操作画布"
+                        placeholder="询问 Codex，或让它操作网站/画布"
                         theme={theme}
                         onPromptChange={(prompt) => setAgentState({ prompt })}
                         onSubmit={sendPrompt}
+                        onStop={stopTurn}
                         onAddFiles={addAttachments}
                         onRemoveAttachment={removeAttachment}
-                        left={attachments.length ? <span className="text-[11px]" style={{ color: theme.node.muted }}>{formatBytes(attachmentPayloadBytes(attachments))} / 30MB</span> : null}
+                        left={
+                            attachments.length ? (
+                                <span className="text-[11px]" style={{ color: theme.node.muted }}>
+                                    {formatBytes(attachmentPayloadBytes(attachments))} / 30MB
+                                </span>
+                            ) : null
+                        }
                     />
                 </>
             )}
@@ -567,31 +640,24 @@ export function CanvasLocalAgentPanel({ snapshot, canUndoOps, collapsed, embedde
     );
 
     if (headless) return null;
-    if (embedded) return content;
-
-    return (
-        <motion.div
-            className="relative z-[70] flex h-full shrink-0"
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: collapsed ? 0 : width + 1, opacity: collapsed ? 0 : 1 }}
-            transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-            style={{ overflow: "clip", pointerEvents: collapsed ? "none" : undefined }}
-        >
-            <motion.aside
-                className="relative flex h-full shrink-0 flex-col border-l"
-                initial={{ x: 48 }}
-                animate={{ x: collapsed ? 28 : 0 }}
-                transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
-                style={{ width, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
-            >
-                <div className="absolute left-0 top-0 h-full w-1 cursor-col-resize transition hover:bg-current/20" onPointerDown={startResize} />
-                {content}
-            </motion.aside>
-        </motion.div>
-    );
+    return embedded ? content : null;
 }
 
-function AgentLogView({ logs, theme, context, onClear, onCopied, onCopyBlocked }: { logs: AgentEventLog[]; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; context: AgentLogContext; onClear: () => void; onCopied: (text: string) => void; onCopyBlocked: (text: string) => void }) {
+function AgentLogView({
+    logs,
+    theme,
+    context,
+    onClear,
+    onCopied,
+    onCopyBlocked,
+}: {
+    logs: AgentEventLog[];
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    context: AgentLogContext;
+    onClear: () => void;
+    onCopied: (text: string) => void;
+    onCopyBlocked: (text: string) => void;
+}) {
     const [mode, setMode] = useState<"text" | "json">("text");
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const content = mode === "text" ? formatLogText(logs, context) : formatLogJson(logs, context);
@@ -612,12 +678,28 @@ function AgentLogView({ logs, theme, context, onClear, onCopied, onCopyBlocked }
                     <div className="text-base font-semibold leading-6">运行日志</div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                    <Segmented size="small" value={mode} onChange={(value) => setMode(value as "text" | "json")} options={[{ label: "排查日志", value: "text" }, { label: "原始 JSON", value: "json" }]} />
+                    <Segmented
+                        size="small"
+                        value={mode}
+                        onChange={(value) => setMode(value as "text" | "json")}
+                        options={[
+                            { label: "排查日志", value: "text" },
+                            { label: "原始 JSON", value: "json" },
+                        ]}
+                    />
                     <div className="flex items-center gap-2">
-                        <span className="text-xs" style={{ color: theme.node.muted }}>{logs.length} 条</span>
-                        <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void copy()}>复制</Button>
-                        <Button size="small" disabled={!lastError} onClick={() => lastError && void copy(formatLogText([lastError], context), "最近错误已复制")}>最近错误</Button>
-                        <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={onClear}>清空</Button>
+                        <span className="text-xs" style={{ color: theme.node.muted }}>
+                            {logs.length} 条
+                        </span>
+                        <Button size="small" icon={<Copy className="size-3.5" />} onClick={() => void copy()}>
+                            复制
+                        </Button>
+                        <Button size="small" disabled={!lastError} onClick={() => lastError && void copy(formatLogText([lastError], context), "最近错误已复制")}>
+                            最近错误
+                        </Button>
+                        <Button size="small" danger type="text" icon={<Trash2 className="size-3.5" />} disabled={!logs.length} onClick={onClear}>
+                            清空
+                        </Button>
                     </div>
                 </div>
                 <textarea
@@ -633,7 +715,29 @@ function AgentLogView({ logs, theme, context, onClear, onCopied, onCopyBlocked }
     );
 }
 
-function AgentConnectView({ theme, url, token, enabled, connected, activity, connectError, onUrlChange, onTokenChange, onToggleEnabled }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; url: string; token: string; enabled: boolean; connected: boolean; activity: string; connectError: string; onUrlChange: (value: string) => void; onTokenChange: (value: string) => void; onToggleEnabled: () => void }) {
+function AgentConnectView({
+    theme,
+    url,
+    token,
+    enabled,
+    connected,
+    activity,
+    connectError,
+    onUrlChange,
+    onTokenChange,
+    onToggleEnabled,
+}: {
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    url: string;
+    token: string;
+    enabled: boolean;
+    connected: boolean;
+    activity: string;
+    connectError: string;
+    onUrlChange: (value: string) => void;
+    onTokenChange: (value: string) => void;
+    onToggleEnabled: () => void;
+}) {
     const { message } = App.useApp();
     const statusText = connectError ? "连接失败" : connected ? activity : enabled ? "连接中" : "未连接";
     const statusColor = connectError ? "#dc2626" : connected ? "#16a34a" : enabled ? "#d97706" : theme.node.muted;
@@ -641,31 +745,60 @@ function AgentConnectView({ theme, url, token, enabled, connected, activity, con
         copyToClipboard(command);
         message.success("命令已复制");
     };
+    const codexPluginReminder = (
+        <div className="rounded-lg border px-3 py-2.5 text-xs leading-5" style={{ borderColor: theme.node.stroke, color: theme.node.muted }}>
+            <div className="font-medium" style={{ color: theme.node.text }}>
+                Codex 插件提醒
+            </div>
+            <div className="mt-1">只有安装 Codex 插件或手动添加 MCP 后，工具列表才会进入 Codex 上下文并增加 token 消耗；仅运行 `npx -y @basketikun/canvas-agent` 启动本地 Agent 不会安装 MCP。</div>
+            <div className="mt-2 grid gap-1.5">
+                {[
+                    ["移除插件", AGENT_PLUGIN_REMOVE_COMMAND],
+                    ["移除手动 MCP", AGENT_MCP_REMOVE_COMMAND],
+                ].map(([label, command]) => (
+                    <div key={command} className="flex items-center gap-2 rounded-md border bg-transparent px-2 py-1.5" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+                        <span className="shrink-0 text-[11px]" style={{ color: theme.node.muted }}>
+                            {label}
+                        </span>
+                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-[11px] leading-5">{command}</code>
+                        <Tooltip title="复制命令">
+                            <Button size="small" type="text" className="!h-6 !w-6 !min-w-6" icon={<Copy className="size-3.5" />} onClick={() => copyCommand(command)} />
+                        </Tooltip>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
     return (
         <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
             <div className="space-y-4">
                 <div>
                     <div className="text-base font-semibold leading-6">连接本地 Agent</div>
                     <div className="mt-1 text-xs leading-5" style={{ color: theme.node.muted }}>
-                        安装 Codex 插件后，画布会优先自动连接本机 Agent。
+                        按使用场景选择一种连接方式。
                     </div>
                 </div>
                 <div className="space-y-2">
-                    {AGENT_CONNECT_STEPS.map((step) => {
+                    {AGENT_CONNECT_STEPS.map((step, index) => {
                         const command = "command" in step ? step.command : "";
                         return (
-                            <div key={step.title} className="rounded-lg px-3 py-2.5">
-                                <div className="text-sm font-medium leading-5">{step.title}</div>
-                                <div className="mt-1 text-xs leading-5" style={{ color: theme.node.muted }}>{step.text}</div>
-                                {command ? (
-                                    <div className="mt-2 flex items-center gap-2 rounded-md border bg-transparent px-2 py-1.5" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
-                                        <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-[11px] leading-5">{command}</code>
-                                        <Tooltip title="复制命令">
-                                            <Button size="small" type="text" className="!h-6 !w-6 !min-w-6" icon={<Copy className="size-3.5" />} onClick={() => copyCommand(command)} />
-                                        </Tooltip>
+                            <Fragment key={step.title}>
+                                <div className="rounded-lg px-3 py-2.5">
+                                    <div className="text-sm font-medium leading-5">{step.title}</div>
+                                    <div className="mt-1 text-xs leading-5" style={{ color: theme.node.muted }}>
+                                        {step.text}
                                     </div>
-                                ) : null}
-                            </div>
+                                    {command ? (
+                                        <div className="mt-2 flex items-center gap-2 rounded-md border bg-transparent px-2 py-1.5" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
+                                            <code className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-[11px] leading-5">{command}</code>
+                                            <Tooltip title="复制命令">
+                                                <Button size="small" type="text" className="!h-6 !w-6 !min-w-6" icon={<Copy className="size-3.5" />} onClick={() => copyCommand(command)} />
+                                            </Tooltip>
+                                        </div>
+                                    ) : null}
+                                </div>
+                                {index === 0 ? codexPluginReminder : null}
+                            </Fragment>
                         );
                     })}
                 </div>
@@ -674,7 +807,10 @@ function AgentConnectView({ theme, url, token, enabled, connected, activity, con
                         <div className="min-w-0 flex-1">
                             <div className="flex min-w-0 items-center gap-2">
                                 <span className="shrink-0 text-sm font-medium leading-5">网页连接</span>
-                                <span className="inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] leading-4" style={{ borderColor: connected || enabled || connectError ? statusColor : theme.node.stroke, color: statusColor }}>
+                                <span
+                                    className="inline-flex min-w-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] leading-4"
+                                    style={{ borderColor: connected || enabled || connectError ? statusColor : theme.node.stroke, color: statusColor }}
+                                >
                                     <span className="size-1.5 shrink-0 rounded-full" style={{ background: statusColor }} />
                                     <span className="truncate">{statusText}</span>
                                 </span>
@@ -702,7 +838,13 @@ function AgentConnectView({ theme, url, token, enabled, connected, activity, con
                                 连接 Token
                                 <span className="font-normal opacity-70">Connect token</span>
                             </span>
-                            <Input.Password size="large" prefix={<KeyRound className="mr-1 size-4" style={{ color: theme.node.faint }} />} value={token} onChange={(event) => onTokenChange(event.target.value)} placeholder="自动发现，或手动填入 Connect token" />
+                            <Input.Password
+                                size="large"
+                                prefix={<KeyRound className="mr-1 size-4" style={{ color: theme.node.faint }} />}
+                                value={token}
+                                onChange={(event) => onTokenChange(event.target.value)}
+                                placeholder="自动发现，或手动填入 Connect token"
+                            />
                         </label>
                         {connectError ? (
                             <div className="rounded-md border px-2.5 py-2 text-xs leading-5" style={{ borderColor: "rgba(220,38,38,.35)", color: "#dc2626" }}>
@@ -716,14 +858,38 @@ function AgentConnectView({ theme, url, token, enabled, connected, activity, con
     );
 }
 
-function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, loading, connected, onRefresh, onNewThread, onResumeThread, onDeleteThread }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes]; threads: AgentThreadSummary[]; activeThreadId: string; workspacePath: string; loading: boolean; connected: boolean; onRefresh: () => void; onNewThread: () => void; onResumeThread: (threadId: string) => void; onDeleteThread: (thread: AgentThreadSummary) => void }) {
+function AgentHistoryView({
+    theme,
+    threads,
+    activeThreadId,
+    workspacePath,
+    loading,
+    connected,
+    onRefresh,
+    onNewThread,
+    onResumeThread,
+    onDeleteThread,
+}: {
+    theme: (typeof canvasThemes)[keyof typeof canvasThemes];
+    threads: AgentThreadSummary[];
+    activeThreadId: string;
+    workspacePath: string;
+    loading: boolean;
+    connected: boolean;
+    onRefresh: () => void;
+    onNewThread: () => void;
+    onResumeThread: (threadId: string) => void;
+    onDeleteThread: (thread: AgentThreadSummary) => void;
+}) {
     return (
         <div className="thin-scrollbar min-h-0 flex-1 overflow-y-auto p-3">
             <div className="space-y-3">
                 <div className="flex min-w-0 items-center gap-2 text-xs" style={{ color: theme.node.muted }}>
                     <FolderOpen className="size-3.5 shrink-0" />
                     <span className="shrink-0">工作空间</span>
-                    <span className="min-w-0 truncate" title={workspacePath}>{workspacePath || "默认画布目录"}</span>
+                    <span className="min-w-0 truncate" title={workspacePath}>
+                        {workspacePath || "默认画布目录"}
+                    </span>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="text-sm" style={{ color: theme.node.muted }}>
@@ -746,7 +912,11 @@ function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, loadi
                                 <div className="flex items-center gap-2">
                                     <div className="min-w-0 flex-1">
                                         <div className="flex min-w-0 items-center gap-1.5">
-                                            {active ? <span className="shrink-0 text-[10px] font-medium" style={{ color: theme.node.text }}>当前</span> : null}
+                                            {active ? (
+                                                <span className="shrink-0 text-[10px] font-medium" style={{ color: theme.node.text }}>
+                                                    当前
+                                                </span>
+                                            ) : null}
                                             <div className="truncate text-sm font-medium leading-5">{thread.name || thread.preview || "未命名对话"}</div>
                                         </div>
                                         <div className="truncate text-[11px] leading-4 opacity-65">{thread.preview || thread.id}</div>
@@ -775,9 +945,13 @@ function AgentHistoryView({ theme, threads, activeThreadId, workspacePath, loadi
     );
 }
 
-async function postState(endpoint: string, token: string, clientId: string, snapshot: CanvasAgentSnapshot) {
+async function postState(endpoint: string, token: string, clientId: string, snapshot: CanvasAgentSnapshot | null) {
     try {
-        await fetch(`${endpoint}/canvas/state?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(snapshot) });
+        await fetch(`${endpoint}/canvas/state?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(snapshot ? { ...snapshot, hasCanvas: true } : { hasCanvas: false }),
+        });
     } catch {}
 }
 
@@ -823,10 +997,12 @@ function formatLogText(logs: AgentEventLog[], context: AgentLogContext) {
         `pendingTool: ${context.pendingTool ? toolName(context.pendingTool) : "none"}`,
         `logs: ${logs.length}`,
     ].join("\n");
-    const body = logs.map((item, index) => {
-        const detail = item.raw == null ? item.text : JSON.stringify(item.raw, null, 2);
-        return [`#${index + 1} ${item.time} ${item.title}`, detail].filter(Boolean).join("\n");
-    }).join("\n\n---\n\n");
+    const body = logs
+        .map((item, index) => {
+            const detail = item.raw == null ? item.text : JSON.stringify(item.raw, null, 2);
+            return [`#${index + 1} ${item.time} ${item.title}`, detail].filter(Boolean).join("\n");
+        })
+        .join("\n\n---\n\n");
     return [head, body || "暂无事件日志"].join("\n\n");
 }
 
@@ -906,7 +1082,20 @@ function toolName(name: string) {
     if (name === "canvas_select_nodes") return "选择节点";
     if (name === "canvas_set_viewport") return "调整视口";
     if (name === "canvas_run_generation") return "触发生成";
+    if (name === "site_navigate") return "网站跳转";
+    if (isSiteTool(name)) return SITE_TOOL_LABELS[name];
     return name;
+}
+
+function siteToolSummary(name: string, result: unknown) {
+    const data = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+    if (name === "canvas_list_projects") return `共 ${numberField(data, "total")} 个画布`;
+    if (name === "prompts_search") return `找到 ${numberField(data, "total")} 条提示词`;
+    if (name === "assets_list") return `共 ${numberField(data, "total")} 个资产`;
+    if (name === "assets_add") return "已加入我的资产";
+    if (name === "workbench_image_generate" || name === "workbench_video_generate") return typeof data.note === "string" ? data.note : "已在工作台执行";
+    if (name === "workbench_image_get_config" || name === "workbench_video_get_config") return "已读取工作台配置";
+    return "已完成";
 }
 
 function isReadTool(name: string) {
@@ -933,7 +1122,12 @@ function toolSummary(item?: AgentEventItem) {
 
 function parseToolResult(result: unknown) {
     const content = objectField(result, "content");
-    const text = Array.isArray(content) ? content.map((item) => objectField(item, "text")).filter((item): item is string => typeof item === "string").join("\n") : "";
+    const text = Array.isArray(content)
+        ? content
+              .map((item) => objectField(item, "text"))
+              .filter((item): item is string => typeof item === "string")
+              .join("\n")
+        : "";
     try {
         return text ? JSON.parse(text) : result;
     } catch {
@@ -1021,7 +1215,7 @@ function formatThreadTime(value?: number) {
 }
 
 function createId() {
-    return typeof crypto === "undefined" ? `${Date.now()}-${Math.random()}` : crypto.randomUUID();
+    return randomId();
 }
 
 function clamp(value: number, min: number, max: number) {
