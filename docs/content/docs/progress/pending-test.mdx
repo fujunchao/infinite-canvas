@@ -1,9 +1,16 @@
 ---
-title: 待测试
-description: 当前版本已实现但仍需人工验证的变更项
+title: Pending Tests
+description: Implemented changes that still need manual verification
 ---
 
-# 待测试
+# Pending Tests
+
+- 合并上游 `v0.14.0`：前端右上角可切换中英文并持久化（导航、首页、配置中心、Ant Design 组件语言跟随），需验证切换后各页面文案与状态一致。
+- 合并上游 `v0.14.0`：Agent 面板支持查看/创建/编辑/删除/启停/显式调用本地 Codex Skill，并可从对话或画布生成 Skill 草稿；需验证 Skill 列表同步、草稿保存与调用流程。
+- 合并上游 `v0.14.0`：Agent 支持选择 Codex 模型与推理强度（含 max/ultra）、三档权限模式、任务进度卡片、工具确认模式移至输入框并默认自动确认；需验证选择持久化与各模式行为。
+- 合并上游 `v0.14.0`：画布左侧面板新增「提示词」Tab（可折叠提示词来源）；提示词中心改为双栏布局，支持自定义 JSON 来源与独立缓存更新；需验证面板与提示词库交互。
+- 合并上游 `v0.14.0`：Canvas Agent 目录重构、升级 Codex 0.146.0，网页侧边栏连接本地 Agent 后需验证对话、工具确认、画布操作与历史线程均正常。
+- 合并上游 `v0.14.0`：fork 独有补丁保留（storageKey 空 URL 素材插入、`@` 引用覆盖层标签渲染、素材插入完整元信息），需回归验证素材插入与 `@` 引用行为与合并前一致。
 
 - 左侧画布面板「资产」Tab：搜索框旁「添加」按钮可上传图片/视频文件（支持多选）加入资产库；每张资产卡片悬停显示移除按钮，二次确认后删除；点击卡片仍插入到画布；需验证添加图片/视频、非图片视频文件的提示、移除确认与插入行为。
 - 左侧画布面板：支持拖拽右边缘调整宽度（记忆到本地）、通过顶栏菜单左侧的开关按钮展开/收起，展开收起有动画；需验证宽度拖拽、动画、刷新后保持展开/收起状态与宽度。
@@ -61,3 +68,16 @@ description: 当前版本已实现但仍需人工验证的变更项
 - 视频生成：任务查询接口直接返回 `url` / `result_url` / `video_url` 时会跳过 `/content` 下载，并优先保存到浏览器本地媒体存储。
 - 视频生成：任务创建或查询失败时会解析接口返回的 `msg` / `message` / 嵌套 JSON 错误，并在生成结果失败卡片里展示真实原因。
 - 画布生成配置：修复切换文本/视频/音频模式时模型选择仍显示为生图模型（gpt-image-2）的问题，切换模式后应自动匹配对应能力的默认模型。
+
+The current release needs manual verification in these areas:
+
+- English and Simplified Chinese switching across navigation, settings, titles, descriptions, Ant Design components, and persisted preferences.
+- Global Dropdown, Menu, Select, Cascader, and TreeSelect popup backgrounds, hover states, and selected states in both light and dark themes.
+- Canvas node resize stability, prompt scrolling, generated-prompt restoration, image editing, drag-and-drop references, and generation configuration.
+- Canvas Agent startup, MCP status, model and permission controls, approvals, version reporting, diagnostics, streaming responses, history consistency, multi-tab isolation, and local Skill management.
+- Agent header tabs in English and Chinese at different panel widths; labels should collapse to icons and counts before either edge is clipped.
+- Agent message layout, Markdown, code blocks, attachments, token statistics, progress timelines, command groups, and scroll-follow behavior.
+- Prompt Center layout, source synchronization, search, asset insertion, prompt detail dialogs, and compact split-layout prompt pickers in the image and video workbenches.
+- Settings import/export, Volcengine Ark protocol handling, and WebDAV-related configuration.
+
+The Chinese version contains the complete item-by-item acceptance checklist.
