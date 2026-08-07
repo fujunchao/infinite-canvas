@@ -13,13 +13,13 @@ cd infinite-canvas
 docker compose up -d
 ```
 
-默认使用当前 fork 发布到 GHCR 的主应用镜像：
+The root Compose file uses the main application image published by this fork:
 
 ```text
 ghcr.io/fujunchao/infinite-canvas:latest
 ```
 
-启动后访问：
+Open `http://localhost:3000` after startup.
 
 ## Build locally
 
@@ -29,31 +29,31 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## Documentation image
 
-文档站位于 `docs/` 目录，按独立的 Next.js 文档应用构建，不打进主应用镜像。
-
-使用发布镜像：
+The documentation in `docs/` is built as a separate Next.js standalone application and is not included in the main application image.
 
 ```bash
 cd docs
 docker compose up -d
 ```
 
-文档站 Compose 默认使用：
+The documentation Compose file uses:
 
 ```text
 ghcr.io/fujunchao/infinite-canvas-docs:latest
 ```
 
-基于当前源码本地构建：
+To build it from the current source:
 
 ```bash
 cd docs
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
-The main application container only runs Next.js. Canvases, My Assets, generation history, and API keys are stored in the browser by default, while prompt repositories are fetched directly by the frontend. No persistent data volume is required for this data.
+## Data storage
 
-当前主应用镜像使用 nginx 托管 Vite 静态产物。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+The main application image uses nginx to serve the Vite static build. Canvases, My Assets, generation history, and AI API keys are stored in the browser by default, while prompt repositories are fetched directly by the frontend. No persistent data volume is required for this data.
+
+## Optional analytics
 
 No analytics are enabled by default. A deployment can enable GA4, Baidu Analytics, or both at runtime:
 
@@ -73,7 +73,7 @@ services:
       ANALYTICS_BAIDU_ID: e8263761cc5c32f5f7a855b8203b965a
 ```
 
-或使用 `docker run`：
+Or use `docker run`:
 
 ```bash
 docker run -d -p 3000:3000 \
@@ -82,8 +82,4 @@ docker run -d -p 3000:3000 \
   ghcr.io/fujunchao/infinite-canvas:latest
 ```
 
-单页应用的路由切换会自动向所有已启用的统计上报 pageview。
-
-<Callout type="warn">
-请只在你自己的站点上配置统计 ID，不要把 ID 提交进仓库；fork 或自托管本项目的用户默认不会产生任何统计。
-</Callout>
+SPA route changes automatically report page views to enabled providers. Only configure analytics IDs on sites you control, and do not commit them to the repository.

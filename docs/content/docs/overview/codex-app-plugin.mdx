@@ -12,11 +12,11 @@ The plugin connects Codex to a local Canvas Agent, allowing Codex to open Infini
 Send this request to Codex:
 
 ```text
-请从 https://github.com/fujunchao/infinite-canvas.git 安装 Infinite Canvas Codex 插件。
-请 clone 仓库到 ~/plugins/infinite-canvas，确认 plugins/infinite-canvas/.codex-plugin/plugin.json 存在，
-把 plugins/infinite-canvas 加入 personal marketplace，先运行 codex plugin marketplace add ~，
-再运行 codex plugin add infinite-canvas@personal。
-安装后请校验插件，并告诉我是否需要开启一个新对话来加载新技能和 MCP 工具。
+Install the Infinite Canvas Codex plugin from https://github.com/fujunchao/infinite-canvas.git.
+Clone it to ~/plugins/infinite-canvas, verify plugins/infinite-canvas/.codex-plugin/plugin.json,
+add the repository to my personal marketplace with `codex plugin marketplace add ~`,
+then install `infinite-canvas@personal`. Validate the installation and tell me whether a new
+conversation is required to load the Skill and MCP tools.
 ```
 
 ## Manual installation
@@ -24,36 +24,6 @@ Send this request to Codex:
 ```bash
 mkdir -p ~/plugins
 git clone https://github.com/fujunchao/infinite-canvas.git ~/plugins/infinite-canvas
-```
-
-确保 `~/.agents/plugins/marketplace.json` 中有 Infinite Canvas 条目。这里的 `path` 要指向仓库里的插件子目录：
-
-```json
-{
-  "name": "personal",
-  "interface": {
-    "displayName": "Personal"
-  },
-  "plugins": [
-    {
-      "name": "infinite-canvas",
-      "source": {
-        "source": "local",
-        "path": "./plugins/infinite-canvas/plugins/infinite-canvas"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-```
-
-然后注册 personal marketplace 并安装插件：
-
-```bash
 codex plugin marketplace add ~
 codex plugin add infinite-canvas@personal
 ```

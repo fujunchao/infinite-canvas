@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveCanvasImageSource } from "../src/lib/canvas/canvas-image-source";
+import { CANVAS_IMAGE_SOURCE_MISSING, resolveCanvasImageSource } from "../src/lib/canvas/canvas-image-source";
 
 describe("resolveCanvasImageSource", () => {
     test("storageKey 存在且 dataUrl 为空时解析出可显示 URL", async () => {
@@ -58,6 +58,6 @@ describe("resolveCanvasImageSource", () => {
                     readImageMeta: async () => ({ width: 1, height: 1, mimeType: "image/png" }),
                 },
             ),
-        ).rejects.toThrow("图片素材文件缺失");
+        ).rejects.toThrow(CANVAS_IMAGE_SOURCE_MISSING);
     });
 });

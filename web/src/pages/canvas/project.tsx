@@ -17,7 +17,7 @@ import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
-import { resolveCanvasImageSource } from "@/lib/canvas/canvas-image-source";
+import { CANVAS_IMAGE_SOURCE_MISSING, resolveCanvasImageSource } from "@/lib/canvas/canvas-image-source";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { App, Button, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
@@ -2640,7 +2640,7 @@ function InfiniteCanvasPage() {
                 const node: CanvasNodeData = {
                     id,
                     type: CanvasNodeType.Image,
-                    title: image.prompt.slice(0, 32) || "Generated Image",
+                    title: image.prompt.slice(0, 32) || t("canvas.projectPage.generatedImage"),
                     position: { x: center.x - config.width / 2, y: center.y - config.height / 2 },
                     width: config.width,
                     height: config.height,
@@ -2652,10 +2652,10 @@ function InfiniteCanvasPage() {
                 setSelectedConnectionId(null);
                 setDialogNodeId(id);
             } catch (error) {
-                message.error(error instanceof Error ? error.message : "图片插入失败");
+                message.error(error instanceof Error && error.message !== CANVAS_IMAGE_SOURCE_MISSING ? error.message : t(error instanceof Error ? "canvas.projectPage.imageAssetMissing" : "canvas.projectPage.imageInsertFailed"));
             }
         },
-        [message, screenToCanvas, size.height, size.width],
+        [message, screenToCanvas, size.height, size.width, t],
     );
 
     const insertAssistantText = useCallback(
@@ -2663,14 +2663,14 @@ function InfiniteCanvasPage() {
             const center = screenToCanvas((containerRef.current?.getBoundingClientRect().left || 0) + size.width / 2, (containerRef.current?.getBoundingClientRect().top || 0) + size.height / 2);
             const node = {
                 ...createCanvasNode(CanvasNodeType.Text, center, { content: text, status: NODE_STATUS_SUCCESS }),
-                title: title || text.slice(0, 32) || "Assistant Text",
+                title: title || text.slice(0, 32) || t("canvas.projectPage.assistantText"),
             };
 
             setNodes((prev) => [...prev, node]);
             setSelectedNodeIds(new Set([node.id]));
             setSelectedConnectionId(null);
         },
-        [screenToCanvas, size.height, size.width],
+        [screenToCanvas, size.height, size.width, t],
     );
 
     const handleAssetInsert = useCallback(
