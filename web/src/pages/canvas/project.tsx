@@ -1495,17 +1495,19 @@ function InfiniteCanvasPage() {
         );
     }, []);
 
-    const duplicateBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
+    const placeBatchImage = useCallback((node: CanvasNodeData, imageId: string, position?: Position) => {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content) return;
         const id = nanoid();
         const edge = Math.max(node.width, node.height);
         const size = fitNodeSize(image.naturalWidth, image.naturalHeight, edge, edge);
-        const copy: CanvasNodeData = {
+        const columns = Math.min(node.metadata?.images?.length || 1, 4);
+        const targetPosition = position ? { x: position.x + node.width / 2 - size.width / 2, y: position.y + node.height / 2 - size.height / 2 } : { x: node.position.x + columns * (node.width + 18) + 60, y: node.position.y + node.height / 2 - size.height / 2 };
+        const placedNode: CanvasNodeData = {
             id,
             type: CanvasNodeType.Image,
             title: node.title,
-            position: { x: node.position.x + node.width * 2 + 96, y: node.position.y + node.height / 2 - size.height / 2 },
+            position: targetPosition,
             ...size,
             metadata: {
                 content: image.content,
@@ -1521,12 +1523,14 @@ function InfiniteCanvasPage() {
                 size: node.metadata?.size,
                 quality: node.metadata?.quality,
                 background: node.metadata?.background,
+                count: 1,
                 references: node.metadata?.references,
             },
         };
-        setNodes((prev) => [...prev, copy]);
+        setNodes((prev) => [...prev, placedNode]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
+        setToolbarNodeId(id);
         setDialogNodeId(id);
     }, []);
 
@@ -2872,7 +2876,7 @@ function InfiniteCanvasPage() {
                             onTitleChange={handleNodeTitleChange}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
-                            onDuplicateBatchImage={duplicateBatchImage}
+                            onPlaceBatchImage={placeBatchImage}
                             onDownloadBatchImage={downloadBatchImage}
                             onRetryBatchImage={retryBatchImage}
                             onDeleteBatchImage={deleteBatchImage}
@@ -2910,7 +2914,7 @@ function InfiniteCanvasPage() {
                 </InfiniteCanvas>
 
                 <CanvasNodeHoverToolbar
-                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedImageNodeId ? null : toolbarNode}
+                    node={isNodeDragging || isNodeResizing || nodeImageSettingsOpen || expandedImageNodeId === toolbarNode?.id ? null : toolbarNode}
                     viewport={viewport}
                     extraTools={toolbarNode ? buildNodeToolbarItems(toolbarNode) : undefined}
                     onKeep={keepNodeToolbar}

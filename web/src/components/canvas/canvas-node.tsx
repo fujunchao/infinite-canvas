@@ -50,7 +50,7 @@ type CanvasNodeProps = {
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (nodeId: string, imageId: string) => void;
-    onDuplicateBatchImage?: (node: CanvasNodeData, imageId: string) => void;
+    onPlaceBatchImage?: (node: CanvasNodeData, imageId: string, position?: Position) => void;
     onDownloadBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
     onDeleteBatchImage?: (nodeId: string, imageId: string) => void;
@@ -62,6 +62,7 @@ type CanvasNodeProps = {
 
 type NodeContentRendererProps = {
     node: CanvasNodeData;
+    scale: number;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -77,7 +78,7 @@ type NodeContentRendererProps = {
     onGenerateImage?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (imageId: string) => void;
-    onDuplicateBatchImage?: (imageId: string) => void;
+    onPlaceBatchImage?: (imageId: string, position?: Position) => void;
     onDownloadBatchImage?: (imageId: string) => void;
     onRetryBatchImage?: (imageId: string) => void;
     onDeleteBatchImage?: (imageId: string) => void;
@@ -114,7 +115,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     onTitleChange,
     onToggleBatch,
     onSetBatchPrimary,
-    onDuplicateBatchImage,
+    onPlaceBatchImage,
     onDownloadBatchImage,
     onRetryBatchImage,
     onDeleteBatchImage,
@@ -319,7 +320,10 @@ export const CanvasNode = React.memo(function CanvasNode({
                 setHovered(false);
                 onHoverEnd(data.id);
             }}
-            onMouseDownCapture={(event) => onSelectCapture?.(event, data.id)}
+            onMouseDownCapture={(event) => {
+                if (event.target instanceof Element && event.target.closest("[data-batch-image-card]")) return;
+                onSelectCapture?.(event, data.id);
+            }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
             {(isSelected || hovered || isEditingTitle) && (
@@ -398,6 +402,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 >
                     <NodeContent
                         node={data}
+                        scale={scale}
                         theme={theme}
                         isEditingContent={isEditingContent}
                         textareaRef={textareaRef}
@@ -413,7 +418,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onGenerateImage={onGenerateImage}
                         onToggleBatch={() => onToggleBatch?.(data.id)}
                         onSetBatchPrimary={(imageId) => onSetBatchPrimary?.(data.id, imageId)}
-                        onDuplicateBatchImage={(imageId) => onDuplicateBatchImage?.(data, imageId)}
+                        onPlaceBatchImage={(imageId, position) => onPlaceBatchImage?.(data, imageId, position)}
                         onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
                         onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
                         onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
@@ -586,10 +591,11 @@ function ImageNodeContent(props: NodeContentRendererProps) {
     return (
         <ImageContent
             node={props.node}
+            scale={props.scale}
             batchExpanded={props.batchExpanded}
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
-            onDuplicateBatchImage={props.onDuplicateBatchImage}
+            onPlaceBatchImage={props.onPlaceBatchImage}
             onDownloadBatchImage={props.onDownloadBatchImage}
             onRetryBatchImage={props.onRetryBatchImage}
             onDeleteBatchImage={props.onDeleteBatchImage}
@@ -643,19 +649,21 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
 
 function ImageContent({
     node,
+    scale,
     batchExpanded,
     onToggleBatch,
     onSetBatchPrimary,
-    onDuplicateBatchImage,
+    onPlaceBatchImage,
     onDownloadBatchImage,
     onRetryBatchImage,
     onDeleteBatchImage,
 }: {
     node: CanvasNodeData;
+    scale: number;
     batchExpanded: boolean;
     onToggleBatch?: () => void;
     onSetBatchPrimary?: (imageId: string) => void;
-    onDuplicateBatchImage?: (imageId: string) => void;
+    onPlaceBatchImage?: (imageId: string, position?: Position) => void;
     onDownloadBatchImage?: (imageId: string) => void;
     onRetryBatchImage?: (imageId: string) => void;
     onDeleteBatchImage?: (imageId: string) => void;
@@ -676,7 +684,7 @@ function ImageContent({
             {batchExpanded
                 ? images
                       .filter((image) => image.id !== primaryImageId)
-                      .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onDuplicate={() => onDuplicateBatchImage?.(image.id)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
+                      .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} scale={scale} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onPlace={(position) => onPlaceBatchImage?.(image.id, position)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
                 : null}
             <div className="h-full w-full overflow-hidden rounded-3xl">
                 {primaryContent ? (
@@ -721,9 +729,11 @@ function ImageContent({
     );
 }
 
-function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; onSetPrimary: () => void; onDuplicate: () => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
+function ExpandedImageCard({ node, image, index, scale, onSetPrimary, onPlace, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; scale: number; onSetPrimary: () => void; onPlace: (position?: Position) => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
+    const dragRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
+    const [dragOffset, setDragOffset] = useState<Position | null>(null);
     const count = node.metadata?.images?.length || 0;
     const columns = Math.min(count, 4);
     const rows = Math.ceil(count / columns);
@@ -734,14 +744,27 @@ function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDo
     const x = column * (node.width + 18);
     const y = (row - rows + 1) * (node.height + 18);
     const downloadLabel = t("common.download");
-    const duplicateLabel = t("canvas.node.createCopy");
+    const placeLabel = t("canvas.node.placeOnCanvas");
     const primaryLabel = t("canvas.node.setPrimary");
     const showActionLabels = node.width >= batchActionLabelsMinWidth;
     const actionClassName = `flex h-8 items-center justify-center rounded-lg border text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02] ${showActionLabels ? "gap-1 px-2" : "w-8 shrink-0 px-0"}`;
+    const finishDrag = (event: React.PointerEvent<HTMLDivElement>, place: boolean) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const clientDx = event.clientX - drag.startX;
+        const clientDy = event.clientY - drag.startY;
+        const moved = drag.moved || Math.hypot(clientDx, clientDy) >= 6;
+        const offset = { x: clientDx / Math.max(scale, 0.05), y: clientDy / Math.max(scale, 0.05) };
+        dragRef.current = null;
+        setDragOffset(null);
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+        if (place && moved) onPlace({ x: node.position.x + x + offset.x, y: node.position.y + y + offset.y });
+    };
 
     return (
         <div
-            className="absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.18)]"
+            data-batch-image-card
+            className={`absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.18)] ${image.content ? (dragOffset ? "cursor-grabbing" : "cursor-grab") : ""}`}
             style={
                 {
                     left: x,
@@ -754,11 +777,41 @@ function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDo
                     "--batch-from-y": `${-y}px`,
                     "--batch-from-rotate": `${4 + index * 2}deg`,
                     animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both`,
+                    translate: dragOffset ? `${dragOffset.x}px ${dragOffset.y}px` : undefined,
+                    zIndex: dragOffset ? 40 : 20,
+                    willChange: dragOffset ? "translate" : undefined,
                 } as React.CSSProperties
             }
             onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-            onDoubleClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => {
+                if (event.target instanceof Element && event.target.closest("button")) {
+                    event.stopPropagation();
+                    return;
+                }
+                if (event.button !== 0 || !image.content) return;
+                event.currentTarget.setPointerCapture(event.pointerId);
+                dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
+            }}
+            onPointerMove={(event) => {
+                const drag = dragRef.current;
+                if (!drag || drag.pointerId !== event.pointerId) return;
+                const clientDx = event.clientX - drag.startX;
+                const clientDy = event.clientY - drag.startY;
+                if (!drag.moved && Math.hypot(clientDx, clientDy) < 6) return;
+                drag.moved = true;
+                setDragOffset({ x: clientDx / Math.max(scale, 0.05), y: clientDy / Math.max(scale, 0.05) });
+                event.preventDefault();
+            }}
+            onPointerUp={(event) => finishDrag(event, true)}
+            onPointerCancel={(event) => finishDrag(event, false)}
+            onLostPointerCapture={() => {
+                dragRef.current = null;
+                setDragOffset(null);
+            }}
+            onDoubleClick={(event) => {
+                event.stopPropagation();
+                if (image.content && !(event.target instanceof Element && event.target.closest("button"))) onPlace();
+            }}
         >
             {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
@@ -769,10 +822,10 @@ function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDo
                             {showActionLabels ? <span className="whitespace-nowrap">{downloadLabel}</span> : null}
                         </button>
                     </Tooltip>
-                    <Tooltip title={showActionLabels ? null : duplicateLabel} placement="top" mouseEnterDelay={0.2}>
-                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={duplicateLabel} onClick={(event) => (event.stopPropagation(), onDuplicate())}>
+                    <Tooltip title={showActionLabels ? null : placeLabel} placement="top" mouseEnterDelay={0.2}>
+                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={placeLabel} onClick={(event) => (event.stopPropagation(), onPlace())}>
                             <Copy className="size-3 shrink-0" />
-                            {showActionLabels ? <span className="whitespace-nowrap">{duplicateLabel}</span> : null}
+                            {showActionLabels ? <span className="whitespace-nowrap">{placeLabel}</span> : null}
                         </button>
                     </Tooltip>
                     <Tooltip title={showActionLabels ? null : primaryLabel} placement="top" mouseEnterDelay={0.2}>
