@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { Tooltip } from "antd";
 import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -15,6 +16,8 @@ import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
+const batchPrimaryLabelMinWidth = 240;
+const batchActionLabelsMinWidth = 320;
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
@@ -665,6 +668,8 @@ function ImageContent({
     const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
     const primaryImage = images.find((image) => image.id === primaryImageId);
     const primaryContent = primaryImage?.content || node.metadata?.content;
+    const downloadLabel = t("common.download");
+    const showPrimaryDownloadLabel = !isBatchRoot || node.width >= batchPrimaryLabelMinWidth;
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded} onToggleBatch={onToggleBatch}>
@@ -688,10 +693,12 @@ function ImageContent({
             </div>
             {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
             {primaryImage?.content ? (
-                <button type="button" className="absolute left-2.5 top-2.5 z-30 flex h-8 items-center gap-1 rounded-lg border px-2 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
-                    <Download className="size-3" />
-                    {t("common.download")}
-                </button>
+                <Tooltip title={showPrimaryDownloadLabel ? null : downloadLabel} placement="top" mouseEnterDelay={0.2}>
+                    <button type="button" className={`absolute left-2.5 top-2.5 z-30 flex h-8 items-center rounded-lg border text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02] ${showPrimaryDownloadLabel ? "gap-1 px-2" : "w-8 justify-center px-0"}`} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={downloadLabel} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
+                        <Download className="size-3 shrink-0" />
+                        {showPrimaryDownloadLabel ? <span className="whitespace-nowrap">{downloadLabel}</span> : null}
+                    </button>
+                </Tooltip>
             ) : null}
             {isBatchRoot ? (
                 <button
@@ -726,6 +733,11 @@ function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDo
     const row = Math.floor(slot / columns);
     const x = column * (node.width + 18);
     const y = (row - rows + 1) * (node.height + 18);
+    const downloadLabel = t("common.download");
+    const duplicateLabel = t("canvas.node.createCopy");
+    const primaryLabel = t("canvas.node.setPrimary");
+    const showActionLabels = node.width >= batchActionLabelsMinWidth;
+    const actionClassName = `flex h-8 items-center justify-center rounded-lg border text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02] ${showActionLabels ? "gap-1 px-2" : "w-8 shrink-0 px-0"}`;
 
     return (
         <div
@@ -750,19 +762,25 @@ function ExpandedImageCard({ node, image, index, onSetPrimary, onDuplicate, onDo
         >
             {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
             {image.content ? (
-                <div className="absolute inset-x-2 top-2 flex items-center gap-1">
-                    <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("common.download")} onClick={(event) => (event.stopPropagation(), onDownload())}>
-                        <Download className="size-3 shrink-0" />
-                        <span className="truncate">{t("common.download")}</span>
-                    </button>
-                    <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.node.createCopy")} onClick={(event) => (event.stopPropagation(), onDuplicate())}>
-                        <Copy className="size-3 shrink-0" />
-                        <span className="truncate">{t("canvas.node.createCopy")}</span>
-                    </button>
-                    <button type="button" className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border px-1.5 text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} title={t("canvas.node.setPrimary")} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
-                        <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                        <span className="truncate">{t("canvas.node.setPrimary")}</span>
-                    </button>
+                <div className="absolute inset-x-2 top-2 flex items-center justify-center gap-1">
+                    <Tooltip title={showActionLabels ? null : downloadLabel} placement="top" mouseEnterDelay={0.2}>
+                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={downloadLabel} onClick={(event) => (event.stopPropagation(), onDownload())}>
+                            <Download className="size-3 shrink-0" />
+                            {showActionLabels ? <span className="whitespace-nowrap">{downloadLabel}</span> : null}
+                        </button>
+                    </Tooltip>
+                    <Tooltip title={showActionLabels ? null : duplicateLabel} placement="top" mouseEnterDelay={0.2}>
+                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={duplicateLabel} onClick={(event) => (event.stopPropagation(), onDuplicate())}>
+                            <Copy className="size-3 shrink-0" />
+                            {showActionLabels ? <span className="whitespace-nowrap">{duplicateLabel}</span> : null}
+                        </button>
+                    </Tooltip>
+                    <Tooltip title={showActionLabels ? null : primaryLabel} placement="top" mouseEnterDelay={0.2}>
+                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={primaryLabel} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
+                            <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
+                            {showActionLabels ? <span className="whitespace-nowrap">{primaryLabel}</span> : null}
+                        </button>
+                    </Tooltip>
                 </div>
             ) : null}
             {image.status === "error" ? <BatchImageFailureActions placement="right" onRetry={onRetry} onDelete={onDelete} /> : null}
