@@ -8,7 +8,7 @@
   },
   "homepage": "https://github.com/fujunchao/infinite-canvas",
   "repository": "https://github.com/fujunchao/infinite-canvas",
-  "license": "AGPL-3.0",
+  "license": "MIT",
   "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
