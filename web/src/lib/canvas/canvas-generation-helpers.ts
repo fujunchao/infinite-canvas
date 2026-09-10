@@ -47,11 +47,12 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
         nodes.map(async (node) => {
             const content = node.metadata?.content;
             if ((node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) && node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveMediaUrl(node.metadata.storageKey, content) } };
-            if (node.type !== CanvasNodeType.Image || !content) return node;
-            const images = await Promise.all((node.metadata.images || []).map(async (image) => (image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
+            if (node.type !== CanvasNodeType.Image) return node;
+            const images = await Promise.all((node.metadata?.images || []).map(async (image) => (image.storageKey || image.content ? { ...image, content: await resolveImageUrl(image.storageKey, image.content) } : image)));
             if (node.metadata?.storageKey) return { ...node, metadata: { ...node.metadata, content: await resolveImageUrl(node.metadata.storageKey, content), images } };
-            if (!content.startsWith("data:image/")) return node;
-            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)) } };
+            if (!content) return images.length ? { ...node, metadata: { ...node.metadata, images } } : node;
+            if (!content.startsWith("data:image/")) return images.length ? { ...node, metadata: { ...node.metadata, images } } : node;
+            return { ...node, metadata: { ...node.metadata, ...imageMetadata(await uploadImage(content)), images } };
         }),
     );
 }
@@ -83,11 +84,12 @@ export function getGenerationCount(count: string) {
 }
 
 export function getInputSummary(inputs: NodeGenerationInput[]) {
+    const resources = [...new Map(inputs.flatMap((input) => (input.type === "group" ? input.children : [input])).map((input) => [input.nodeId, input])).values()];
     return {
-        textCount: inputs.filter((input) => input.type === "text").length,
-        imageCount: inputs.filter((input) => input.type === "image").length,
-        videoCount: inputs.filter((input) => input.type === "video").length,
-        audioCount: inputs.filter((input) => input.type === "audio").length,
+        textCount: resources.filter((input) => input.type === "text").length,
+        imageCount: resources.filter((input) => input.type === "image").length,
+        videoCount: resources.filter((input) => input.type === "video").length,
+        audioCount: resources.filter((input) => input.type === "audio").length,
     };
 }
 
@@ -103,6 +105,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
+        videoMode: node?.metadata?.videoMode || config.videoMode || defaultConfig.videoMode,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
@@ -113,7 +116,7 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
     return nodes.map((node) =>
-        node.metadata?.status === "loading"
+        node.metadata?.status === "loading" && !hasResumableVideoTask(node)
             ? {
                   ...node,
                   metadata: {
@@ -125,6 +128,10 @@ export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
               }
             : node,
     );
+}
+
+export function hasResumableVideoTask(node: CanvasNodeData) {
+    return node.type === CanvasNodeType.Video && Boolean(node.metadata?.videoTaskId && node.metadata.videoTaskProvider && node.metadata.videoTaskModel) && !node.metadata?.content;
 }
 
 export function isGenerationCanceled(error: unknown) {

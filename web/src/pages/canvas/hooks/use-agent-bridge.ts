@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState, type Dispatch, type MutableR
 import i18n from "@/i18n";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { applyCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
+import { resolveImagePlacementNodes } from "@/lib/canvas/canvas-image-placements";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasConnection, CanvasNodeData, ContextMenuState, ViewportTransform } from "@/types/canvas";
 
@@ -39,7 +40,7 @@ export function useAgentBridge(params: AgentBridgeParams) {
     const [agentUndoSnapshot, setAgentUndoSnapshot] = useState<CanvasAgentSnapshot | null>(null);
     const projectTitle = title || i18n.t("canvas.project.untitled");
 
-    const agentSnapshot = useMemo<CanvasAgentSnapshot>(() => ({ projectId, title: projectTitle, nodes, connections, selectedNodeIds: Array.from(selectedNodeIds), viewport }), [connections, projectTitle, nodes, projectId, selectedNodeIds, viewport]);
+    const agentSnapshot = useMemo<CanvasAgentSnapshot>(() => ({ projectId, title: projectTitle, nodes: resolveImagePlacementNodes(nodes), connections, selectedNodeIds: Array.from(selectedNodeIds), viewport }), [connections, projectTitle, nodes, projectId, selectedNodeIds, viewport]);
     const applyAgentOps = useCallback(
         (ops?: CanvasAgentOp[]) => {
             const safeOps = Array.isArray(ops) ? ops.filter((op) => op?.type) : [];
@@ -69,7 +70,7 @@ export function useAgentBridge(params: AgentBridgeParams) {
                     }),
                 );
             }
-            return { ...next, projectId, title: projectTitle };
+            return { ...next, nodes: resolveImagePlacementNodes(next.nodes), projectId, title: projectTitle };
         },
         [projectTitle, projectId],
     );
@@ -86,7 +87,7 @@ export function useAgentBridge(params: AgentBridgeParams) {
         setViewport(agentUndoSnapshot.viewport);
         setContextMenu(null);
         setAgentUndoSnapshot(null);
-        return { ...agentUndoSnapshot, projectId, title: projectTitle };
+        return { ...agentUndoSnapshot, nodes: resolveImagePlacementNodes(agentUndoSnapshot.nodes), projectId, title: projectTitle };
     }, [agentUndoSnapshot, projectTitle, projectId]);
 
     useEffect(() => {

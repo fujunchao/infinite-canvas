@@ -56,7 +56,7 @@ type CanvasProject = {
 ```ts
 type CanvasNodeData = {
   id: string;
-  type: "image" | "text" | "config" | "video";
+  type: "image" | "text" | "config" | "video" | "audio" | "group" | string;
   title: string;
   position: { x: number; y: number };
   width: number;
@@ -68,7 +68,7 @@ type CanvasNodeData = {
 通用字段：
 
 - `id`：节点 ID。
-- `type`：节点类型，当前有图片、文本、生成配置、视频四类。
+- `type`：节点类型，内置图片、文本、生成配置、视频、音频和分组，并允许插件扩展字符串类型。
 - `title`：节点标题。
 - `position`：画布世界坐标，不是屏幕坐标。
 - `width` / `height`：画布世界坐标下的节点尺寸。
@@ -82,7 +82,7 @@ type CanvasNodeImage = {
   status: "idle" | "success" | "loading" | "error";
   errorDetails?: string;
   content: string;
-  storageKey: string;
+  storageKey?: string;
   naturalWidth: number;
   naturalHeight: number;
   bytes: number;
@@ -95,16 +95,24 @@ type CanvasNodeMetadata = {
   status?: "idle" | "success" | "loading" | "error";
   errorDetails?: string;
   fontSize?: number;
-  generationMode?: "text" | "image" | "video";
+  generationMode?: "text" | "image" | "video" | "audio";
   model?: string;
   size?: string;
   count?: number;
+  textCount?: number;
+  videoMode?: string;
+  videoTaskId?: string;
+  videoTaskProvider?: "openai" | "gemini" | "seedance";
+  videoTaskModel?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   freeResize?: boolean;
   images?: CanvasNodeImage[];
   primaryImageId?: string;
-  inputOrder?: string[];
+  imageRef?: {
+    batchNodeId: string;
+    imageId: string;
+  };
   storageKey?: string;
   mimeType?: string;
   bytes?: number;
@@ -116,9 +124,33 @@ type CanvasNodeMetadata = {
 - 图片节点：`content` 是当前可展示的图片 URL，通常是 `blob:` URL；`storageKey` 指向本地图片 Blob；`naturalWidth/naturalHeight/bytes/mimeType` 保存原图信息。
 - 视频节点：`content` 是当前可播放的视频 URL，通常是 `blob:` URL；`storageKey` 指向本地视频 Blob；`bytes/mimeType` 保存文件信息。
 - 文本节点：`content` 保存文本内容；`fontSize` 保存字体大小；`prompt/status/errorDetails` 保存生成状态。
-- 生成配置节点：`generationMode/model/size/count/inputOrder` 保存生成配置；`generationMode` 可选择文本、图片或视频；上游输入通过 `connections` 计算。
-- 多图图片节点：批量生成仍只保存为一个图片节点，请求开始前会在 `images` 中创建全部图片槽位，每个槽位通过 `status/errorDetails` 独立记录实时状态，成功后补充图片数据；最先成功的槽位会立即写入 `primaryImageId`，并由节点级 `content` 和图片元数据展示；展开状态仅属于当前界面，不写入项目数据。
-- 旧版多图兼容：打开根节点与子节点结构的旧项目时，会将没有外部引用的子图转换为 `images` 槽位；带有外部连线、分组或助手引用的子图继续作为独立节点保留。
+- 生成配置节点：`generationMode/model/size/count` 保存生成配置；上游输入通过 `connections` 计算。
+
+## 多图资源与放置节点
+
+多图生成采用“资源根节点 + 真实放置节点”的混合结构：
+
+- 根节点是图片资源的权威来源，`metadata.images[]` 保存全部请求槽位、每张图片的生成状态、错误、尺寸、MIME、字节数和 `storageKey`。
+- `metadata.primaryImageId` 指定主图，根节点级的 `content/storageKey/naturalWidth/naturalHeight/bytes/mimeType` 始终镜像该图片；任意图片最先成功后立即成为主图。
+- 每张候选图同时拥有一个真实 `CanvasNodeData` 放置节点。放置节点持久化 `metadata.imageRef = { batchNodeId, imageId }`、`freeResize`、`groupId` 等交互字段，以及自己的提示词草稿和生成配置覆盖值；不重复保存被引用图片的 `content`、`storageKey` 和文件元数据。
+- 节点渲染、左侧元素列表、生成输入、预览、下载、保存素材和图片工具栏都在运行时从根节点对应 `images[]` 条目解析放置节点内容。
+
+因此生成 3 张图片时，画布会创建 1 个资源根节点和 3 个真实放置节点，共显示 4 个图片框。来源只连接根节点，不创建根节点到放置节点的内部 `CanvasConnection`。每个放置节点都有稳定 ID，并独立保存位置和尺寸，可以直接选择、移动、缩放、建立外部连线、复制、重试和使用完整图片工具栏。
+
+展开状态只属于当前界面，不写入项目数据。收起图片组时只隐藏放置节点及其外部连线，不删除节点和连线；再次展开后恢复原位置、尺寸和关系。拖动根节点时全部放置节点按相同位移一起移动，即使它们当前处于隐藏状态。打开或取消工具、修改提示词或生成配置，以及派生裁剪、遮罩、切图、放大或角度结果，都保留原图的 `imageRef`。只有实际替换原图媒体时才解析并解除引用，转为普通图片节点；没有其他放置节点继续引用原图时，根节点才移除对应资源。
+
+删除根节点时会级联删除全部放置节点。删除某个放置节点时，仅在它是该图片最后一个引用后才从 `images[]` 移除资源；批次只剩一张图片时，会保守解散为普通图片节点并保留已有外部连线。复制或创建根节点副本时会连同放置节点一起复制，并重映射 `imageRef.batchNodeId`；单独复制放置节点时允许继续共享原根节点资源和同一个 `storageKey`。
+
+画布 Agent 的操作遵循同一规则：移动根节点时联动未被显式移动的放置节点；提示词与配置修改保存在放置节点；状态、尺寸和文件元信息校正更新根资源；实际替换内容才解除引用。对 Agent 发布的快照会解析候选图片内容，撤销快照则保留原始存储结构；删除仍采用相同的级联删除和保守解散语义。
+
+打开旧版“根节点 + 子节点”项目时，会复用旧子节点 ID、位置、尺寸、存储元数据、主图和外部连线，将其转换为放置节点，并只删除废弃的根节点到子节点内部连线。打开只有 `images[]` 但缺少放置节点的新版项目时，也会按确定性 ID 自动补齐放置节点。
+
+## 生成参数、组引用和视频任务
+
+- `metadata.textCount` 独立控制文本生成次数，多次结果仍是普通文本节点，不使用 `texts[]` 候选面板。
+- 组用 `metadata.groupId` 关联直接成员；作为生成输入时展开有效资源，若主图对应的放置节点已在组内，不重复计入根节点镜像。参考栏以整组为单位断开组引用。
+- 视频用 `videoMode` 保存首尾帧或全能参考模式；`videoTaskId`、`videoTaskProvider`、`videoTaskModel` 在查询前保存远端任务及原渠道模型，刷新后可继续查询同一任务，不受下一次生成模型选择影响。网络失败保留任务身份，远端明确失败清除任务身份；自定义脚本仍使用原有内存结果路径，不承诺相同恢复能力。
+- 项目 store 另存 `deletedProjects: { id, deletedAt }[]`，WebDAV 清单的画布域使用 `deleted` 列表携带删除标记，防止较旧远端项目复活；更新更晚的远端编辑可覆盖删除标记。这不是节点字段，也不是账号云同步。
 
 ## 连线结构
 
@@ -134,7 +166,7 @@ type CanvasConnection = {
 
 连线只保存节点 ID，不保存端口坐标。渲染时根据节点位置和尺寸计算路径。
 
-删除节点时会同步删除以该节点为起点或终点的连线。删除图片组根节点时，会把对应子节点一起删除。
+删除节点时会同步删除以该节点为起点或终点的连线。图片组收起时，放置节点的外部连线只在界面中隐藏，项目数据中的连线仍然保留；删除图片组根节点时才会级联删除全部放置节点及其连线。
 
 ## 助手会话结构
 
@@ -174,8 +206,8 @@ type CanvasAssistantMessage = {
 
 所有新增图片应通过 `uploadImage(input)` 写入：
 
-1. 传入 `Blob` 或 data URL。
-2. 内部转成 `Blob`。
+1. 传入 `Blob`、data URL 或远程图片 URL。
+2. 下载为 `Blob`，支持取消和超时，并确认图片可解码；HTTP 失败、取消或超时不作为成功结果。
 3. 生成 `storageKey`，格式为 `image:<id>`。
 4. 把 Blob 写入 `image_files`。
 5. 创建 `blob:` URL，并缓存在内存 `objectUrls`。
@@ -184,7 +216,7 @@ type CanvasAssistantMessage = {
 ```ts
 type UploadedImage = {
   url: string;
-  storageKey: string;
+  storageKey?: string;
   width: number;
   height: number;
   bytes: number;
@@ -207,6 +239,8 @@ type UploadedImage = {
 ```
 
 因此，`content` 只适合当前浏览器会话展示，不能作为长期文件标识；长期标识是 `storageKey`。
+
+远程图片若无法下载、但仍能读取尺寸并显示，可保留原 URL，此时 `storageKey` 为空，不能视为已经离线保存。启用本地代理后，HTTP 下载经过本机进程转发，Blob/data URL 不受影响，项目、媒体和 API Key 的本地存储位置不变。
 
 ## 图片读取和旧数据迁移
 

@@ -1,8 +1,9 @@
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { detachImagePlacementNode, planImagePlacementRemoval, removeCanvasNodes, syncBatchNodeImages } from "@/lib/canvas/canvas-image-placements";
 import { getNodeSpec, isRegisteredNodeType } from "@/lib/canvas/node-registry";
-import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type ViewportTransform } from "@/types/canvas";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata, type CanvasNodeTypeId, type ViewportTransform } from "@/types/canvas";
 
 export type CanvasAgentOp =
     | { type: "add_node"; id?: string; nodeType?: CanvasNodeTypeId; title?: string; position?: { x: number; y: number }; x?: number; y?: number; width?: number; height?: number; metadata?: CanvasNodeMetadata }
@@ -39,8 +40,10 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
     let connections = snapshot.connections;
     let selectedNodeIds = snapshot.selectedNodeIds;
     let viewport = snapshot.viewport;
+    const safeOps = Array.isArray(ops) ? ops : [];
+    const explicitlyMovedNodeIds = new Set(safeOps.flatMap((op) => (op?.type === "update_node" && op.patch?.position ? [op.id] : [])));
 
-    (Array.isArray(ops) ? ops : []).forEach((op, index) => {
+    safeOps.forEach((op, index) => {
         if (!op?.type) return;
         if (op.type === "add_node") {
             const nodeType = op.nodeType && isRegisteredNodeType(op.nodeType) ? op.nodeType : CanvasNodeType.Text;
@@ -59,13 +62,34 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
         }
         if (op.type === "update_node") {
             if (!op.id) return;
-            nodes = nodes.map((node) => (node.id === op.id ? { ...node, ...op.patch, metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata } } : node));
+            const metadataPatch = { ...op.patch?.metadata, ...op.metadata };
+            const currentNode = nodes.find((node) => node.id === op.id);
+            const shouldDetach = Boolean(currentNode?.metadata?.imageRef && ((op.patch?.type && op.patch.type !== currentNode.type) || Object.keys(metadataPatch).some((key) => ["content", "storageKey", "images"].includes(key))));
+            if (shouldDetach) nodes = detachImagePlacementNode(nodes, op.id);
+            else if (currentNode?.metadata?.imageRef) {
+                const ref = currentNode.metadata.imageRef;
+                const resourceKeys = ["status", "errorDetails", "naturalWidth", "naturalHeight", "bytes", "mimeType"] as const;
+                const resourcePatch = Object.fromEntries(resourceKeys.filter((key) => key in metadataPatch).map((key) => [key, metadataPatch[key]])) as Partial<CanvasNodeImage>;
+                if (Object.keys(resourcePatch).length) nodes = nodes.map((node) => node.id === ref.batchNodeId && node.metadata?.images ? syncBatchNodeImages(node, node.metadata.images.map((image) => image.id === ref.imageId ? { ...image, ...resourcePatch } : image)) : node);
+                resourceKeys.forEach((key) => delete metadataPatch[key]);
+            }
+            const current = nodes.find((node) => node.id === op.id);
+            if (!current) return;
+            let updated: CanvasNodeData = { ...current, ...op.patch, metadata: { ...current.metadata, ...metadataPatch } };
+            if (updated.metadata?.images?.length) updated = syncBatchNodeImages(updated, updated.metadata.images, updated.metadata.primaryImageId, Object.prototype.hasOwnProperty.call(metadataPatch, "primaryImageId"));
+            const dx = op.patch?.position ? op.patch.position.x - current.position.x : 0;
+            const dy = op.patch?.position ? op.patch.position.y - current.position.y : 0;
+            nodes = nodes.map((node) => {
+                if (node.id === op.id) return updated;
+                return (dx || dy) && !explicitlyMovedNodeIds.has(node.id) && node.metadata?.imageRef?.batchNodeId === op.id ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } } : node;
+            });
         }
         if (op.type === "delete_node") {
             const ids = new Set(op.ids || (op.id ? [op.id] : op.nodeType ? nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []));
-            nodes = nodes.filter((node) => !ids.has(node.id));
-            connections = connections.filter((conn) => !ids.has(conn.fromNodeId) && !ids.has(conn.toNodeId));
-            selectedNodeIds = selectedNodeIds.filter((id) => !ids.has(id));
+            const removal = planImagePlacementRemoval(nodes, ids);
+            nodes = removeCanvasNodes(nodes, removal.removedNodeIds, removal.removedImagesByBatchId);
+            connections = connections.filter((conn) => !removal.removedNodeIds.has(conn.fromNodeId) && !removal.removedNodeIds.has(conn.toNodeId));
+            selectedNodeIds = selectedNodeIds.filter((id) => !removal.removedNodeIds.has(id));
         }
         if (op.type === "delete_connections") {
             const ids = new Set(op.ids || (op.id ? [op.id] : []));

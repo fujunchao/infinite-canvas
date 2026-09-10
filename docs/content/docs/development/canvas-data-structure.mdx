@@ -33,7 +33,7 @@ The viewport stores screen translation in `x` and `y`, and scale in `k`.
 ```ts
 type CanvasNodeData = {
   id: string;
-  type: "image" | "text" | "config" | "video";
+  type: "image" | "text" | "config" | "video" | "audio" | "group" | string;
   title: string;
   position: { x: number; y: number };
   width: number;
@@ -46,11 +46,55 @@ type CanvasConnection = {
   fromNodeId: string;
   toNodeId: string;
 };
+
+type CanvasNodeImage = {
+  id: string;
+  status: "idle" | "success" | "loading" | "error";
+  errorDetails?: string;
+  content: string;
+  storageKey?: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  bytes: number;
+  mimeType: string;
+};
+
+type CanvasImagePlacementRef = {
+  batchNodeId: string;
+  imageId: string;
+};
 ```
 
 Node positions and sizes use canvas-world coordinates. Edges store only node IDs; their paths are calculated while rendering. Deleting a node removes its connected edges.
 
-Common metadata includes content, prompt, status, generation mode, model, size, count, natural dimensions, image results, input order, `storageKey`, MIME type, and byte size. A multi-image generation remains one image node: `images` creates all requested slots before generation starts and records each slot's `status`, `errorDetails`, and completed image data. `primaryImageId` selects the result mirrored by the node-level `content` and image metadata; the first successful slot becomes primary immediately. Image and video `content` values are normally session-scoped `blob:` URLs; `storageKey` is the persistent identity. Projects saved by the legacy root/child batch structure are normalized when opened; unreferenced child nodes become image slots, while children with external connections, groups, or assistant references remain independent nodes.
+Common metadata includes content, prompt, status, generation settings, natural dimensions, `storageKey`, MIME type, and byte size. Image and video `content` values are normally session-scoped `blob:` URLs; `storageKey` is the persistent identity.
+
+## Multi-image resources and placement nodes
+
+Multi-image generation uses a hybrid structure:
+
+- The image root is the authoritative resource owner. Its `metadata.images[]` contains every requested image, per-image generation state, dimensions, MIME type, byte size, and `storageKey`.
+- `metadata.primaryImageId` selects the image mirrored into the root-level `content`, `storageKey`, dimensions, MIME type, and byte size. The first successful image becomes primary immediately.
+- Every candidate is also represented by a real `CanvasNodeData` placement node. Its persisted metadata contains `imageRef: { batchNodeId, imageId }`, interaction fields such as `freeResize` and `groupId`, and optional per-placement prompt/config overrides; it does not duplicate image content or file metadata.
+- Rendering, the side panel, generation inputs, downloads, previews, and image tools resolve a placement's image data from the referenced root at runtime.
+
+Generating three images therefore creates four canvas frames: one resource root and three real placement nodes. The source connects only to the root; there are no internal root-to-placement `CanvasConnection` records. Placement nodes have stable IDs and independently persist position and size, so they can be selected, moved, resized, connected, copied, retried, and used through the full image toolbar.
+
+Expansion is UI state rather than project data. Collapsing a batch hides its placement nodes and their external edges without deleting either; expanding restores the saved geometry and edges. Moving the root moves every placement by the same delta, including hidden placements. Opening/canceling tools, editing prompts/configuration and deriving new images preserve the original reference. Only replacing the placement's media materializes it as an ordinary node and removes the original batch resource when no other placement references it.
+
+Deleting the root deletes its placements. Deleting a placement removes the referenced image resource only after the final placement for that image is removed. When one image remains, the batch is conservatively dissolved into ordinary image nodes so existing external edges remain valid. Copying or duplicating a root includes its placements and remaps `imageRef.batchNodeId`; a placement copied alone may continue sharing the original resource and `storageKey`.
+
+Canvas Agent uses the same rules. Root movement shifts placements unless explicitly moved in the same operation batch; prompt/config changes stay on the placement; status and file-metadata corrections update its root resource; replacing content detaches. Snapshots resolve the referenced content, while undo snapshots retain the original storage structure.
+
+Projects saved by the legacy root/child batch structure are normalized when opened. Existing child IDs, geometry, storage metadata, primary selection, and external edges are retained as placement nodes, while obsolete root-to-child internal edges are removed. Current `images[]` projects missing placement nodes receive deterministic placements during the same normalization step.
+
+## Generation, groups and video tasks
+
+`metadata.textCount` independently controls text generation count; multiple text results remain ordinary nodes, not `texts[]` candidates. Groups use `metadata.groupId`; generation flattens direct resource members and excludes a root's primary mirror when the corresponding placement is already a member. The reference bar removes group references as a whole.
+
+Video metadata adds `videoMode`, `videoTaskId`, `videoTaskProvider` (`openai`, `gemini`, or `seedance`) and `videoTaskModel`. Native task identity and the original channel/model are saved before polling so reopening the canvas can query the same task even after changing the next-generation model. Network failures retain identity; confirmed remote task failures clear it. Scripted jobs retain their existing in-memory result path and do not receive this recovery guarantee.
+
+The project store also persists `deletedProjects: { id, deletedAt }[]`. WebDAV carries these as the canvas manifest's `deleted` list; deletion hides an older project copy, while a newer edit can supersede the deletion marker. These records are not node data or an account-based cloud database.
 
 ## Assistant sessions
 
@@ -68,6 +112,6 @@ Message references and generated images use the same blob-storage rules. They ar
 
 ## Media lifecycle
 
-`uploadImage()` converts a Blob or data URL to a Blob, creates an `image:<id>` storage key, stores it in `image_files`, creates an in-memory object URL, reads its dimensions, and returns the URL and metadata. Opening a project resolves each storage key into a fresh object URL.
+`uploadImage()` accepts Blobs, data URLs and remote URLs, supports cancellation, and decodes the downloaded image before storing it in `image_files`. Successful local storage returns an `image:<id>` key, dimensions and an in-memory object URL; opening a project resolves the key again. A displayable remote image that cannot be fetched may remain URL-only, without a storage key. HTTP failures, timeouts and cancellation do not use this fallback. Enabling the optional local proxy forwards HTTP downloads through the local process; it does not change where projects, keys or blobs are stored.
 
 Cleanup is reference-based. After deleting nodes, canvases, assets, or assistant sessions, the application collects every still-referenced storage key, removes unreferenced blobs, revokes their object URLs, and removes them from the in-memory cache. This prevents deleting a file still shared by another canvas feature.

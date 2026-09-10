@@ -111,6 +111,7 @@ function configNodeOp(id: string, input: Record<string, unknown>, x: number, y: 
             vquality: input.vquality,
             generateAudio: input.generateAudio,
             watermark: input.watermark,
+            videoMode: input.videoMode,
             audioVoice: input.audioVoice,
             audioFormat: input.audioFormat,
             audioSpeed: input.audioSpeed,
@@ -128,11 +129,16 @@ function generationFlowOps(input: Record<string, unknown>, state: CanvasSnapshot
     const textId = `text-${crypto.randomUUID()}`;
     const configId = `config-${crypto.randomUUID()}`;
     const referenceNodeIds = Array.isArray(input.referenceNodeIds) ? input.referenceNodeIds.filter((id): id is string => typeof id === "string") : [];
-    const tokens = [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)];
+    // 提示词只有已有节点引用时，直接复用；放置节点 ID 也可能包含冒号。
+    const mentionedIds = [...prompt.matchAll(/@\[node:([^\]\s]+)\]/g)].map((match) => match[1]);
+    const reuseReferences = referenceNodeIds.length > 0 && mentionedIds.length > 0
+        && mentionedIds.every((id) => referenceNodeIds.includes(id))
+        && prompt.replace(/@\[node:[^\]\s]+\]/g, "").trim() === "";
+    const tokens = reuseReferences ? referenceNodeIds.map((id) => `@[node:${id}]`) : [`@[node:${textId}]`, ...referenceNodeIds.map((id) => `@[node:${id}]`)];
     return [
-        textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y),
+        ...(reuseReferences ? [] : [textNodeOp({ id: textId, text: prompt, title: String(input.title || "提示词") }, x, y)]),
         configNodeOp(configId, { ...input, prompt: tokens.join("\n") }, x + 420, y),
-        { type: "connect_nodes", fromNodeId: textId, toNodeId: configId },
+        ...(reuseReferences ? [] : [{ type: "connect_nodes", fromNodeId: textId, toNodeId: configId }]),
         ...referenceNodeIds.map((fromNodeId) => ({ type: "connect_nodes", fromNodeId, toNodeId: configId })),
         { type: "select_nodes", ids: [configId] },
         ...(input.autoRun ? [runGenerationOp(configId, mode, tokens.join("\n"))] : []),

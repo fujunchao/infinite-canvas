@@ -1,9 +1,9 @@
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import i18n from "@/i18n";
-import { seedanceReferenceLabel } from "@/lib/seedance-video";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { imageToDataUrl } from "@/services/image-storage";
+import { resolveImagePlacementNodes } from "@/lib/canvas/canvas-image-placements";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 
 export type CanvasResourceKind = "image" | "video" | "audio" | "text";
@@ -24,11 +24,11 @@ export function buildNodeMentionReferences(node: CanvasNodeData, nodes: CanvasNo
 }
 
 export function buildCanvasResourceReferences(nodes: CanvasNodeData[]) {
-    return labelResourceNodes(nodes, true);
+    return labelResourceNodes(resolveImagePlacementNodes(nodes), true);
 }
 
 export async function resolveCanvasReferenceImages(references: CanvasResourceReference[], nodes: CanvasNodeData[]) {
-    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    const nodesById = new Map(resolveImagePlacementNodes(nodes).map((node) => [node.id, node]));
     return Promise.all(references.filter((reference) => reference.kind === "image").map(async (reference) => {
         const node = nodesById.get(reference.nodeId);
         if (!node) throw new Error(i18n.t("agent.composer.mentions.resourceMissing", { title: reference.title }));
@@ -52,33 +52,54 @@ export async function resolveCanvasReferenceImages(references: CanvasResourceRef
 }
 
 export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
-    const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
+    nodes = resolveImagePlacementNodes(nodes);
+    const configInputs = expandGroupResourceNodes(getConnectedConfigInputNodes(nodeId, nodes, connections), nodes);
     if (configInputs.length) return configInputs;
-    const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
+    const ownInputs = expandGroupResourceNodes(getContextInputNodes(nodeId, nodes, connections), nodes);
     if (ownInputs.length) return ownInputs;
     const node = nodes.find((item) => item.id === nodeId);
     return node && isResourceNode(node) ? [node] : [];
 }
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
-    const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
+    nodes = resolveImagePlacementNodes(nodes);
+    const configInputs = getConnectedConfigInputNodes(nodeId, nodes, connections);
     if (configInputs.length) return configInputs;
-    const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
+    const ownInputs = getContextInputNodes(nodeId, nodes, connections);
     if (ownInputs.length) return ownInputs;
     return [];
 }
 
-function getContextResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+function getContextInputNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     return connections
         .filter((connection) => connection.toNodeId === nodeId)
         .map((connection) => nodes.find((node) => node.id === connection.fromNodeId))
-        .filter((node): node is CanvasNodeData => Boolean(node && isResourceNode(node)));
+        .filter((node): node is CanvasNodeData => Boolean(node && isCanvasReferenceNode(node, nodes)));
 }
 
-function getConnectedConfigResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+function getConnectedConfigInputNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     const configConnection = connections.find((connection) => connection.fromNodeId === nodeId && nodes.find((node) => node.id === connection.toNodeId)?.type === CanvasNodeType.Config);
     if (!configConnection) return [];
-    return getContextResourceNodes(configConnection.toNodeId, nodes, connections).filter((node) => node.id !== nodeId);
+    return getContextInputNodes(configConnection.toNodeId, nodes, connections).filter((node) => node.id !== nodeId);
+}
+
+function hasGroupResources(node: CanvasNodeData, nodes: CanvasNodeData[]) {
+    return node.type === CanvasNodeType.Group && getGroupResourceNodes(node.id, nodes).length > 0;
+}
+
+export function isCanvasReferenceNode(node: CanvasNodeData, nodes: CanvasNodeData[]) {
+    return isResourceNode(node) || hasGroupResources(node, nodes);
+}
+
+function expandGroupResourceNodes(inputNodes: CanvasNodeData[], nodes: CanvasNodeData[]) {
+    const resources = inputNodes.flatMap((node) => (node.type === CanvasNodeType.Group ? getGroupResourceNodes(node.id, nodes) : [node]));
+    return [...new Map(resources.map((node) => [node.id, node])).values()];
+}
+
+export function getGroupResourceNodes(groupId: string, nodes: CanvasNodeData[]) {
+    const members = resolveImagePlacementNodes(nodes).filter((node) => node.metadata?.groupId === groupId && isResourceNode(node));
+    const placedImages = new Set(members.flatMap((node) => node.metadata?.imageRef ? [`${node.metadata.imageRef.batchNodeId}:${node.metadata.imageRef.imageId}`] : []));
+    return members.filter((node) => !placedImages.has(`${node.id}:${node.metadata?.primaryImageId}`));
 }
 
 function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
@@ -106,8 +127,8 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
 
 function labelForKind(kind: CanvasResourceKind, index: number) {
     if (kind === "image") return imageReferenceLabel(index);
-    if (kind === "video") return seedanceReferenceLabel("video", index);
-    if (kind === "audio") return seedanceReferenceLabel("audio", index);
+    if (kind === "video") return i18n.t("canvas.configNode.videoReferences") + ` ${index + 1}`;
+    if (kind === "audio") return i18n.t("canvas.configNode.audioReferences") + ` ${index + 1}`;
     return i18n.t("canvas.composer.resources.text", { index: index + 1 });
 }
 

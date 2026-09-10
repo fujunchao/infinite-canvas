@@ -1,4 +1,5 @@
-import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, CanvasNodeImage } from "@/types/canvas";
+import { createImagePlacementNode, materializeImagePlacementNode, placementMetadata } from "@/lib/canvas/canvas-image-placements";
+import type { CanvasConnection, CanvasNodeData, CanvasNodeImage } from "@/types/canvas";
 
 type LegacyBatchMetadata = CanvasNodeData["metadata"] & {
     isBatchRoot?: boolean;
@@ -8,49 +9,118 @@ type LegacyBatchMetadata = CanvasNodeData["metadata"] & {
     imageBatchExpanded?: boolean;
 };
 
-export function migrateLegacyCanvasData(nodes: CanvasNodeData[], connections: CanvasConnection[], sessions: CanvasAssistantSession[]) {
-    const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    const referencedIds = new Set(sessions.flatMap((session) => session.messages.flatMap((message) => (message.references || []).map((reference) => reference.id))));
-    const removedIds = new Set<string>();
-    const migrated = nodes.map((node) => {
+export function migrateLegacyCanvasData(nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    const originalById = new Map(nodes.map((node) => [node.id, node]));
+    const legacyRoots = new Map<string, { root: CanvasNodeData; images: CanvasNodeImage[]; childIds: string[] }>();
+    const legacyChildRootIds = new Map<string, string>();
+
+    nodes.forEach((node) => {
         const metadata = node.metadata as LegacyBatchMetadata | undefined;
         const childIds = metadata?.batchChildIds || [];
-        if (!metadata?.isBatchRoot || !childIds.length || metadata.images?.length) return node;
-        const children = childIds.map((id) => nodeById.get(id)).filter((child): child is CanvasNodeData => Boolean(child));
-        const images = children.map((child) => legacyImage(child, child.id === metadata.primaryImageId ? node : undefined));
-        const primary = images.find((image) => image.id === metadata.primaryImageId && image.content) || images.find((image) => image.content);
-        const preservedIds = new Set(
-            children
-                .filter((child) => referencedIds.has(child.id) || child.metadata?.groupId || connections.some((connection) => (connection.fromNodeId === child.id || connection.toNodeId === child.id) && !(connection.fromNodeId === node.id && connection.toNodeId === child.id)))
-                .map((child) => child.id),
-        );
-        childIds.forEach((id) => {
-            if (!preservedIds.has(id)) removedIds.add(id);
-        });
-        const cleanMetadata = stripLegacyBatchMetadata(metadata);
-        return {
-            ...node,
-            metadata: {
-                ...cleanMetadata,
-                images,
-                count: images.length,
-                primaryImageId: primary?.id,
-                ...(primary
-                    ? {
-                          content: primary.content,
-                          storageKey: primary.storageKey,
-                          naturalWidth: primary.naturalWidth,
-                          naturalHeight: primary.naturalHeight,
-                          bytes: primary.bytes,
-                          mimeType: primary.mimeType,
-                      }
-                    : {}),
-            },
-        };
+        if (!metadata?.isBatchRoot || !childIds.length) return;
+        const children = childIds.map((id) => originalById.get(id)).filter((child): child is CanvasNodeData => Boolean(child));
+        const images = metadata.images?.length ? metadata.images : children.map((child) => legacyImage(child, child.id === metadata.primaryImageId ? node : undefined));
+        legacyRoots.set(node.id, { root: node, images, childIds });
+        childIds.forEach((childId) => legacyChildRootIds.set(childId, node.id));
     });
+
+    const normalized = nodes.map((node) => {
+        const legacyRoot = legacyRoots.get(node.id);
+        if (legacyRoot) return normalizeBatchRoot(legacyRoot.root, legacyRoot.images);
+
+        const legacyRootId = legacyChildRootIds.get(node.id);
+        if (legacyRootId) {
+            const image = legacyRoots.get(legacyRootId)?.images.find((item) => item.id === node.id);
+            if (image) return { ...node, metadata: placementMetadata({ batchNodeId: legacyRootId, imageId: image.id }, node.metadata) };
+        }
+
+        const metadata = stripLegacyBatchMetadata(node.metadata as LegacyBatchMetadata | undefined);
+        const normalizedNode = { ...node, metadata };
+        return !metadata?.imageRef && metadata?.images?.length ? normalizeBatchRoot(normalizedNode, metadata.images) : normalizedNode;
+    });
+
+    const normalizedById = new Map(normalized.map((node) => [node.id, node]));
+    const recoveredOwnerByNodeId = new Map<string, CanvasNodeData>();
+    const recoveredInternalConnections = new Set<string>();
+    connections.forEach((connection) => {
+        const owner = normalizedById.get(connection.fromNodeId);
+        if (owner?.metadata?.images?.some((image) => image.id === connection.toNodeId)) recoveredOwnerByNodeId.set(connection.toNodeId, owner);
+    });
+    const recoveredPlacements = normalized.map((node) => {
+        if (node.metadata?.imageRef || node.metadata?.images?.length) return node;
+        const owner = recoveredOwnerByNodeId.get(node.id);
+        if (!owner) return node;
+        recoveredInternalConnections.add(`${owner.id}\u0000${node.id}`);
+        return { ...node, metadata: placementMetadata({ batchNodeId: owner.id, imageId: node.id }, node.metadata) };
+    });
+    const recoveredById = new Map(recoveredPlacements.map((node) => [node.id, node]));
+    const normalizedPlacements = recoveredPlacements.map((node) => {
+        const imageRef = node.metadata?.imageRef;
+        if (!imageRef) return node;
+        const batchNode = recoveredById.get(imageRef.batchNodeId);
+        if ((batchNode?.metadata?.images?.length || 0) <= 1) return materializeImagePlacementNode(node, recoveredById);
+        return { ...node, metadata: placementMetadata(imageRef, node.metadata) };
+    });
+    const placementsByImage = new Map<string, CanvasNodeData[]>();
+    normalizedPlacements.forEach((node) => {
+        const imageRef = node.metadata?.imageRef;
+        if (!imageRef) return;
+        const key = `${imageRef.batchNodeId}\u0000${imageRef.imageId}`;
+        placementsByImage.set(key, [...(placementsByImage.get(key) || []), node]);
+    });
+
+    const existingIds = new Set(normalizedPlacements.map((node) => node.id));
+    const addedPlacements: CanvasNodeData[] = [];
+    const validPlacementIds = new Set<string>();
+    normalizedPlacements.forEach((batchNode) => {
+        const images = batchNode.metadata?.images || [];
+        if (images.length <= 1) return;
+        images.forEach((image, index) => {
+            const key = `${batchNode.id}\u0000${image.id}`;
+            const existing = placementsByImage.get(key) || [];
+            if (existing.length) {
+                existing.forEach((placement) => validPlacementIds.add(placement.id));
+                return;
+            }
+            const placement = createImagePlacementNode(batchNode, image, index);
+            while (existingIds.has(placement.id)) placement.id = `${placement.id}:copy`;
+            existingIds.add(placement.id);
+            validPlacementIds.add(placement.id);
+            addedPlacements.push(placement);
+        });
+    });
+
+    const migratedNodes = [...normalizedPlacements.filter((node) => !node.metadata?.imageRef || validPlacementIds.has(node.id)), ...addedPlacements];
+    const migratedIds = new Set(migratedNodes.map((node) => node.id));
+    const legacyInternalConnections = new Set(
+        [...legacyRoots.entries()].flatMap(([rootId, root]) => root.childIds.filter((childId) => root.images.some((image) => image.id === childId)).map((childId) => `${rootId}\u0000${childId}`)),
+    );
     return {
-        nodes: migrated.filter((node) => !removedIds.has(node.id)).map((node) => ({ ...node, metadata: stripLegacyBatchMetadata(node.metadata as LegacyBatchMetadata | undefined) })),
-        connections: connections.filter((connection) => !removedIds.has(connection.fromNodeId) && !removedIds.has(connection.toNodeId)),
+        nodes: migratedNodes,
+        connections: connections.filter((connection) => {
+            const key = `${connection.fromNodeId}\u0000${connection.toNodeId}`;
+            return migratedIds.has(connection.fromNodeId) && migratedIds.has(connection.toNodeId) && !legacyInternalConnections.has(key) && !recoveredInternalConnections.has(key);
+        }),
+    };
+}
+
+function normalizeBatchRoot(node: CanvasNodeData, images: CanvasNodeImage[]) {
+    const metadata = stripLegacyBatchMetadata(node.metadata as LegacyBatchMetadata | undefined);
+    const primary = images.find((image) => image.id === metadata?.primaryImageId && image.content) || images.find((image) => image.content) || images[0];
+    return {
+        ...node,
+        metadata: {
+            ...metadata,
+            images,
+            count: images.length,
+            primaryImageId: primary?.id,
+            content: primary?.content || undefined,
+            storageKey: primary?.storageKey || undefined,
+            naturalWidth: primary?.naturalWidth || undefined,
+            naturalHeight: primary?.naturalHeight || undefined,
+            bytes: primary?.bytes || undefined,
+            mimeType: primary?.mimeType || undefined,
+        },
     };
 }
 

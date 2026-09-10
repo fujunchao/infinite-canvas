@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Tooltip } from "antd";
-import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
+import { ChevronRight, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes } from "@/lib/image-utils";
@@ -9,15 +8,13 @@ import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textarea";
-import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, type Position } from "@/types/canvas";
 import type { CanvasNodeContext, CanvasPluginHost } from "@/types/canvas-plugin";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { useTranslation } from "react-i18next";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const selectionBlue = "#2f80ff";
-const batchPrimaryLabelMinWidth = 240;
-const batchActionLabelsMinWidth = 320;
 
 type CanvasNodeProps = {
     data: CanvasNodeData;
@@ -27,6 +24,7 @@ type CanvasNodeProps = {
     isFocusRelated: boolean;
     isConnectionTarget: boolean;
     isConnecting: boolean;
+    referenceSelectionState?: "target" | "disabled" | "available";
     editRequestNonce?: number;
     showPanel: boolean;
     showImageInfo: boolean;
@@ -49,20 +47,16 @@ type CanvasNodeProps = {
     onContentChange: (nodeId: string, content: string) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onToggleBatch?: (nodeId: string) => void;
-    onSetBatchPrimary?: (nodeId: string, imageId: string) => void;
-    onPlaceBatchImage?: (node: CanvasNodeData, imageId: string, position?: Position) => void;
-    onDownloadBatchImage?: (node: CanvasNodeData, imageId: string) => void;
-    onRetryBatchImage?: (node: CanvasNodeData, imageId: string) => void;
-    onDeleteBatchImage?: (nodeId: string, imageId: string) => void;
+    onSetBatchPrimary?: (node: CanvasNodeData) => void;
     onRetry?: (node: CanvasNodeData) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onViewImage?: (node: CanvasNodeData) => void;
+    onSelectReference?: (nodeId: string) => void;
     onContextMenu: (event: React.MouseEvent, nodeId: string) => void;
 };
 
 type NodeContentRendererProps = {
     node: CanvasNodeData;
-    scale: number;
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     isEditingContent: boolean;
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
@@ -77,11 +71,7 @@ type NodeContentRendererProps = {
     onRetry?: (node: CanvasNodeData) => void;
     onGenerateImage?: (node: CanvasNodeData) => void;
     onToggleBatch?: () => void;
-    onSetBatchPrimary?: (imageId: string) => void;
-    onPlaceBatchImage?: (imageId: string, position?: Position) => void;
-    onDownloadBatchImage?: (imageId: string) => void;
-    onRetryBatchImage?: (imageId: string) => void;
-    onDeleteBatchImage?: (imageId: string) => void;
+    onSetBatchPrimary?: () => void;
     groupChildCount: number;
 };
 
@@ -93,6 +83,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     isFocusRelated,
     isConnectionTarget,
     isConnecting,
+    referenceSelectionState,
     editRequestNonce = 0,
     showPanel,
     showImageInfo,
@@ -115,13 +106,10 @@ export const CanvasNode = React.memo(function CanvasNode({
     onTitleChange,
     onToggleBatch,
     onSetBatchPrimary,
-    onPlaceBatchImage,
-    onDownloadBatchImage,
-    onRetryBatchImage,
-    onDeleteBatchImage,
     onRetry,
     onGenerateImage,
     onViewImage,
+    onSelectReference,
     onContextMenu,
 }: CanvasNodeProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -321,12 +309,17 @@ export const CanvasNode = React.memo(function CanvasNode({
                 onHoverEnd(data.id);
             }}
             onMouseDownCapture={(event) => {
-                if (event.target instanceof Element && event.target.closest("[data-batch-image-card]")) return;
-                onSelectCapture?.(event, data.id);
+                if (!referenceSelectionState) return onSelectCapture?.(event, data.id);
+                event.stopPropagation();
+                event.preventDefault();
+                if (event.button === 0 && referenceSelectionState === "available") onSelectReference?.(data.id);
             }}
-            onContextMenu={(event) => onContextMenu(event, data.id)}
+            onContextMenu={(event) => {
+                if (referenceSelectionState) event.preventDefault();
+                else onContextMenu(event, data.id);
+            }}
         >
-            {(isSelected || hovered || isEditingTitle) && (
+            {!referenceSelectionState && (isSelected || hovered || isEditingTitle) && (
                 <div className="absolute left-3 top-[-28px] z-[65] max-w-[calc(100%-24px)]" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                     {isEditingTitle ? (
                         <input
@@ -372,6 +365,10 @@ export const CanvasNode = React.memo(function CanvasNode({
                 }}
                 onMouseDown={(event) => onMouseDown(event, data.id)}
                 onDoubleClick={(event) => {
+                    if (referenceSelectionState) {
+                        event.stopPropagation();
+                        return;
+                    }
                     if (isBatchRoot) {
                         event.stopPropagation();
                         onToggleBatch?.(data.id);
@@ -396,13 +393,12 @@ export const CanvasNode = React.memo(function CanvasNode({
                     style={
                         {
                             background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
-                            pointerEvents: contentInteractive ? undefined : "none",
+                            pointerEvents: referenceSelectionState ? "none" : contentInteractive ? undefined : "none",
                         } as React.CSSProperties
                     }
                 >
                     <NodeContent
                         node={data}
-                        scale={scale}
                         theme={theme}
                         isEditingContent={isEditingContent}
                         textareaRef={textareaRef}
@@ -417,11 +413,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         onRetry={onRetry}
                         onGenerateImage={onGenerateImage}
                         onToggleBatch={() => onToggleBatch?.(data.id)}
-                        onSetBatchPrimary={(imageId) => onSetBatchPrimary?.(data.id, imageId)}
-                        onPlaceBatchImage={(imageId, position) => onPlaceBatchImage?.(data, imageId, position)}
-                        onDownloadBatchImage={(imageId) => onDownloadBatchImage?.(data, imageId)}
-                        onRetryBatchImage={(imageId) => onRetryBatchImage?.(data, imageId)}
-                        onDeleteBatchImage={(imageId) => onDeleteBatchImage?.(data.id, imageId)}
+                        onSetBatchPrimary={() => onSetBatchPrimary?.(data)}
                         groupChildCount={groupChildCount}
                     />
                 </div>
@@ -430,14 +422,20 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
-                <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
-                <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
-                <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
-                <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
+                {referenceSelectionState ? (
+                    <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "available" ? 25 : 65}%, transparent)`, boxShadow: referenceSelectionState === "available" && hovered ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>
+                        {referenceSelectionState === "target" || (referenceSelectionState === "available" && hovered) ? <span className="rounded-lg px-3 py-2 text-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>{t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")}</span> : null}
+                    </div>
+                ) : <>
+                    <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
+                    <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
+                    <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
+                    <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
+                </>}
             </div>
 
-            {!isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
-            {!isGroup ? <ConnectionHandleDot side="right" visible={(definition?.hasSourceHandle ?? true) && data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} onMouseDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
+            {!referenceSelectionState && !isGroup ? <ConnectionHandleDot side="left" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
+            {!referenceSelectionState && (definition?.hasSourceHandle ?? true) && data.type !== CanvasNodeType.Config ? <ConnectionHandleDot side="right" visible={hovered || isSelected || isConnecting} onMouseDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
 
             {showPanel && !isGroup && renderPanel ? <div className="absolute left-1/2 top-full z-[70] w-[600px] -translate-x-1/2 pt-4">{renderPanel(data)}</div> : null}
         </div>
@@ -586,26 +584,38 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
 }
 
 function ImageNodeContent(props: NodeContentRendererProps) {
-    if (!props.node.metadata?.content && !props.isBatchRoot) return <EmptyImageContent {...props} />;
+    if (!props.node.metadata?.content && props.isBatchRoot) {
+        const content =
+            props.node.metadata?.status === "loading" ? (
+                <LoadingContent theme={props.theme} />
+            ) : props.node.metadata?.status === "error" ? (
+                <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />
+            ) : (
+                <EmptyImageContent {...props} isBatchRoot={false} />
+            );
+        return (
+            <BatchFrame batchCount={props.batchCount} batchExpanded={props.batchExpanded} onToggleBatch={props.onToggleBatch}>
+                {content}
+            </BatchFrame>
+        );
+    }
+    if (!props.node.metadata?.content) return <EmptyImageContent {...props} />;
 
     return (
         <ImageContent
             node={props.node}
-            scale={props.scale}
+            isBatchRoot={props.isBatchRoot}
+            batchCount={props.batchCount}
             batchExpanded={props.batchExpanded}
             onToggleBatch={props.onToggleBatch}
             onSetBatchPrimary={props.onSetBatchPrimary}
-            onPlaceBatchImage={props.onPlaceBatchImage}
-            onDownloadBatchImage={props.onDownloadBatchImage}
-            onRetryBatchImage={props.onRetryBatchImage}
-            onDeleteBatchImage={props.onDeleteBatchImage}
         />
     );
 }
 
-function EmptyImageContent({ theme }: NodeContentRendererProps) {
+function EmptyImageContent({ theme, isBatchRoot, batchCount, batchExpanded, onToggleBatch }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    return (
+    const content = (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
             <div className="flex size-14 items-center justify-center rounded-2xl" style={{ background: theme.toolbar.activeBg }}>
                 <ImageIcon className="size-6 opacity-30" />
@@ -613,6 +623,13 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
             <span className="text-[10px] tracking-[0.18em] opacity-50">{t("canvas.node.emptyImage")}</span>
         </div>
     );
+    if (isBatchRoot)
+        return (
+            <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded} onToggleBatch={onToggleBatch}>
+                {content}
+            </BatchFrame>
+        );
+    return content;
 }
 
 function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
@@ -624,7 +641,7 @@ function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
-    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-no-zoom />;
+    return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
@@ -649,65 +666,34 @@ function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
 
 function ImageContent({
     node,
-    scale,
+    isBatchRoot,
+    batchCount,
     batchExpanded,
     onToggleBatch,
     onSetBatchPrimary,
-    onPlaceBatchImage,
-    onDownloadBatchImage,
-    onRetryBatchImage,
-    onDeleteBatchImage,
 }: {
     node: CanvasNodeData;
-    scale: number;
+    isBatchRoot: boolean;
+    batchCount: number;
     batchExpanded: boolean;
     onToggleBatch?: () => void;
-    onSetBatchPrimary?: (imageId: string) => void;
-    onPlaceBatchImage?: (imageId: string, position?: Position) => void;
-    onDownloadBatchImage?: (imageId: string) => void;
-    onRetryBatchImage?: (imageId: string) => void;
-    onDeleteBatchImage?: (imageId: string) => void;
+    onSetBatchPrimary?: () => void;
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { t } = useTranslation();
-    const images = node.metadata?.images || [];
-    const batchCount = images.length;
-    const isBatchRoot = batchCount > 1;
-    const primaryImageId = node.metadata?.primaryImageId || images[0]?.id;
-    const primaryImage = images.find((image) => image.id === primaryImageId);
-    const primaryContent = primaryImage?.content || node.metadata?.content;
-    const downloadLabel = t("common.download");
-    const showPrimaryDownloadLabel = !isBatchRoot || node.width >= batchPrimaryLabelMinWidth;
+    const isImagePlacement = Boolean(node.metadata?.imageRef);
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded} onToggleBatch={onToggleBatch}>
-            {batchExpanded
-                ? images
-                      .filter((image) => image.id !== primaryImageId)
-                      .map((image, index) => <ExpandedImageCard key={image.id} node={node} image={image} index={index} scale={scale} onSetPrimary={() => onSetBatchPrimary?.(image.id)} onPlace={(position) => onPlaceBatchImage?.(image.id, position)} onDownload={() => onDownloadBatchImage?.(image.id)} onRetry={() => onRetryBatchImage?.(image.id)} onDelete={() => onDeleteBatchImage?.(image.id)} />)
-                : null}
             <div className="h-full w-full overflow-hidden rounded-3xl">
-                {primaryContent ? (
-                    <img
-                        src={primaryContent}
-                        alt={node.title}
-                        draggable={false}
-                        onDragStart={(event) => event.preventDefault()}
-                        className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
-                    />
-                ) : (
-                    <ImageSlotStatus image={primaryImage} />
-                )}
+                <img
+                    src={node.metadata!.content!}
+                    alt={node.title}
+                    draggable={false}
+                    onDragStart={(event) => event.preventDefault()}
+                    className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
+                />
             </div>
-            {primaryImage?.status === "error" ? <BatchImageFailureActions placement="left" onRetry={() => onRetryBatchImage?.(primaryImage.id)} onDelete={() => onDeleteBatchImage?.(primaryImage.id)} /> : null}
-            {primaryImage?.content ? (
-                <Tooltip title={showPrimaryDownloadLabel ? null : downloadLabel} placement="top" mouseEnterDelay={0.2}>
-                    <button type="button" className={`absolute left-2.5 top-2.5 z-30 flex h-8 items-center rounded-lg border text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02] ${showPrimaryDownloadLabel ? "gap-1 px-2" : "w-8 justify-center px-0"}`} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={downloadLabel} onClick={(event) => (event.stopPropagation(), onDownloadBatchImage?.(primaryImage.id))}>
-                        <Download className="size-3 shrink-0" />
-                        {showPrimaryDownloadLabel ? <span className="whitespace-nowrap">{downloadLabel}</span> : null}
-                    </button>
-                </Tooltip>
-            ) : null}
             {isBatchRoot ? (
                 <button
                     type="button"
@@ -725,147 +711,23 @@ function ImageContent({
                     <ChevronRight className={`size-3.5 opacity-80 transition-transform ${batchExpanded ? "rotate-90" : ""}`} />
                 </button>
             ) : null}
-        </BatchFrame>
-    );
-}
-
-function ExpandedImageCard({ node, image, index, scale, onSetPrimary, onPlace, onDownload, onRetry, onDelete }: { node: CanvasNodeData; image: CanvasNodeImage; index: number; scale: number; onSetPrimary: () => void; onPlace: (position?: Position) => void; onDownload: () => void; onRetry: () => void; onDelete: () => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { t } = useTranslation();
-    const dragRef = useRef<{ pointerId: number; startX: number; startY: number; moved: boolean } | null>(null);
-    const [dragOffset, setDragOffset] = useState<Position | null>(null);
-    const count = node.metadata?.images?.length || 0;
-    const columns = Math.min(count, 4);
-    const rows = Math.ceil(count / columns);
-    const rootSlot = (rows - 1) * columns;
-    const slot = index >= rootSlot ? index + 1 : index;
-    const column = slot % columns;
-    const row = Math.floor(slot / columns);
-    const x = column * (node.width + 18);
-    const y = (row - rows + 1) * (node.height + 18);
-    const downloadLabel = t("common.download");
-    const placeLabel = t("canvas.node.placeOnCanvas");
-    const primaryLabel = t("canvas.node.setPrimary");
-    const showActionLabels = node.width >= batchActionLabelsMinWidth;
-    const actionClassName = `flex h-8 items-center justify-center rounded-lg border text-[10px] font-medium shadow-[0_6px_18px_rgba(15,23,42,.16)] backdrop-blur-md transition hover:scale-[1.02] ${showActionLabels ? "gap-1 px-2" : "w-8 shrink-0 px-0"}`;
-    const finishDrag = (event: React.PointerEvent<HTMLDivElement>, place: boolean) => {
-        const drag = dragRef.current;
-        if (!drag || drag.pointerId !== event.pointerId) return;
-        const clientDx = event.clientX - drag.startX;
-        const clientDy = event.clientY - drag.startY;
-        const moved = drag.moved || Math.hypot(clientDx, clientDy) >= 6;
-        const offset = { x: clientDx / Math.max(scale, 0.05), y: clientDy / Math.max(scale, 0.05) };
-        dragRef.current = null;
-        setDragOffset(null);
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-        if (place && moved) onPlace({ x: node.position.x + x + offset.x, y: node.position.y + y + offset.y });
-    };
-
-    return (
-        <div
-            data-batch-image-card
-            className={`absolute z-20 overflow-hidden rounded-3xl border shadow-[0_18px_50px_rgba(28,25,23,.18)] ${image.content ? (dragOffset ? "cursor-grabbing" : "cursor-grab") : ""}`}
-            style={
-                {
-                    left: x,
-                    top: y,
-                    width: node.width,
-                    height: node.height,
-                    background: theme.node.panel,
-                    borderColor: theme.node.stroke,
-                    "--batch-from-x": `${-x}px`,
-                    "--batch-from-y": `${-y}px`,
-                    "--batch-from-rotate": `${4 + index * 2}deg`,
-                    animation: `canvas-batch-child-in 320ms ${index * 35}ms cubic-bezier(.2,.85,.18,1) both`,
-                    translate: dragOffset ? `${dragOffset.x}px ${dragOffset.y}px` : undefined,
-                    zIndex: dragOffset ? 40 : 20,
-                    willChange: dragOffset ? "translate" : undefined,
-                } as React.CSSProperties
-            }
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => {
-                if (event.target instanceof Element && event.target.closest("button")) {
-                    event.stopPropagation();
-                    return;
-                }
-                if (event.button !== 0 || !image.content) return;
-                event.currentTarget.setPointerCapture(event.pointerId);
-                dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, moved: false };
-            }}
-            onPointerMove={(event) => {
-                const drag = dragRef.current;
-                if (!drag || drag.pointerId !== event.pointerId) return;
-                const clientDx = event.clientX - drag.startX;
-                const clientDy = event.clientY - drag.startY;
-                if (!drag.moved && Math.hypot(clientDx, clientDy) < 6) return;
-                drag.moved = true;
-                setDragOffset({ x: clientDx / Math.max(scale, 0.05), y: clientDy / Math.max(scale, 0.05) });
-                event.preventDefault();
-            }}
-            onPointerUp={(event) => finishDrag(event, true)}
-            onPointerCancel={(event) => finishDrag(event, false)}
-            onLostPointerCapture={() => {
-                dragRef.current = null;
-                setDragOffset(null);
-            }}
-            onDoubleClick={(event) => {
-                event.stopPropagation();
-                if (image.content && !(event.target instanceof Element && event.target.closest("button"))) onPlace();
-            }}
-        >
-            {image.content ? <img src={image.content} alt={node.title} draggable={false} className="pointer-events-none h-full w-full select-none object-contain" /> : <ImageSlotStatus image={image} />}
-            {image.content ? (
-                <div className="absolute inset-x-2 top-2 flex items-center justify-center gap-1">
-                    <Tooltip title={showActionLabels ? null : downloadLabel} placement="top" mouseEnterDelay={0.2}>
-                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={downloadLabel} onClick={(event) => (event.stopPropagation(), onDownload())}>
-                            <Download className="size-3 shrink-0" />
-                            {showActionLabels ? <span className="whitespace-nowrap">{downloadLabel}</span> : null}
-                        </button>
-                    </Tooltip>
-                    <Tooltip title={showActionLabels ? null : placeLabel} placement="top" mouseEnterDelay={0.2}>
-                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={placeLabel} onClick={(event) => (event.stopPropagation(), onPlace())}>
-                            <Copy className="size-3 shrink-0" />
-                            {showActionLabels ? <span className="whitespace-nowrap">{placeLabel}</span> : null}
-                        </button>
-                    </Tooltip>
-                    <Tooltip title={showActionLabels ? null : primaryLabel} placement="top" mouseEnterDelay={0.2}>
-                        <button type="button" className={actionClassName} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.toolbar.activeText }} aria-label={primaryLabel} onClick={(event) => (event.stopPropagation(), onSetPrimary())}>
-                            <Star className="size-3 shrink-0" style={{ color: selectionBlue }} />
-                            {showActionLabels ? <span className="whitespace-nowrap">{primaryLabel}</span> : null}
-                        </button>
-                    </Tooltip>
-                </div>
+            {isImagePlacement ? (
+                <button
+                    type="button"
+                    className="absolute right-3 top-3 z-30 flex h-9 items-center gap-1.5 rounded-xl border px-2.5 text-xs font-medium opacity-0 shadow-[0_8px_20px_rgba(68,64,60,.13)] backdrop-blur-md transition group-hover/batch:opacity-100 hover:scale-[1.02]"
+                    style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onSetBatchPrimary?.();
+                    }}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                >
+                    <Star className="size-3.5" style={{ color: selectionBlue }} />
+                    {t("canvas.node.setPrimary")}
+                </button>
             ) : null}
-            {image.status === "error" ? <BatchImageFailureActions placement="right" onRetry={onRetry} onDelete={onDelete} /> : null}
-        </div>
-    );
-}
-
-function BatchImageFailureActions({ placement, onRetry, onDelete }: { placement: "left" | "right"; onRetry: () => void; onDelete: () => void }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { t } = useTranslation();
-    return (
-        <div className={`absolute top-3 z-30 flex items-center gap-1.5 ${placement === "left" ? "left-3" : "right-3"}`}>
-            <button type="button" className="flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium shadow-sm transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onRetry())}>
-                <RefreshCw className="size-3.5" />
-                {t("canvas.node.retry")}
-            </button>
-            <button type="button" className="grid size-8 place-items-center rounded-lg border shadow-sm transition hover:scale-[1.02]" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onClick={(event) => (event.stopPropagation(), onDelete())} aria-label={t("common.delete")} title={t("common.delete")}>
-                <Trash2 className="size-3.5" />
-            </button>
-        </div>
-    );
-}
-
-function ImageSlotStatus({ image }: { image?: CanvasNodeImage }) {
-    const theme = canvasThemes[useThemeStore((state) => state.theme)];
-    const { t } = useTranslation();
-    const failed = image?.status === "error";
-    return (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
-            {failed ? <span className="text-xs leading-5">{image.errorDetails || t("canvas.node.failed")}</span> : <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />}
-            {!failed ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
-        </div>
+        </BatchFrame>
     );
 }
 
@@ -900,7 +762,7 @@ function BatchFrame({ batchCount, batchExpanded, onToggleBatch, children }: { ba
         >
             {isBatchRoot ? (
                 <div className="pointer-events-none absolute inset-0 overflow-visible">
-                    {Array.from({ length: Math.min(batchCount - 1, 3) }).map((_, index) => (
+                    {Array.from({ length: Math.min(batchCount, 3) }).map((_, index) => (
                         <div
                             key={index}
                             className="absolute rounded-[inherit] border shadow-[0_10px_24px_rgba(68,64,60,.12)] transition-all duration-300 group-hover/batch:translate-x-1"
