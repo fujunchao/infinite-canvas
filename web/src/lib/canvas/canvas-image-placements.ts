@@ -1,5 +1,5 @@
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
-import { CanvasNodeType, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata } from "@/types/canvas";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata } from "@/types/canvas";
 
 const PLACEMENT_GAP = 36;
 const PLACEMENT_OFFSET = 120;
@@ -67,6 +67,61 @@ export function resolveImagePlacementNodes(nodes: CanvasNodeData[]) {
     return nodes.map((node) => resolveImagePlacementNode(node, nodeById));
 }
 
+export function isImageBatchRoot(node: CanvasNodeData) {
+    const count = node.metadata?.images?.length || 0;
+    return node.type === CanvasNodeType.Image && (count > 1 || (count > 0 && node.metadata?.imageBatchExpanded !== undefined));
+}
+
+export function getExpandedImageBatchIds(nodes: CanvasNodeData[]) {
+    return new Set(nodes.filter((node) => isImageBatchRoot(node) && node.metadata?.imageBatchExpanded).map((node) => node.id));
+}
+
+export function setImageBatchExpansion(nodes: CanvasNodeData[], expandedIds: ReadonlySet<string>) {
+    let changed = false;
+    const next = nodes.map((node) => {
+        if (!isImageBatchRoot(node) || Boolean(node.metadata?.imageBatchExpanded) === expandedIds.has(node.id)) return node;
+        changed = true;
+        return { ...node, metadata: { ...node.metadata, imageBatchExpanded: expandedIds.has(node.id) } };
+    });
+    return changed ? next : nodes;
+}
+
+export function imagePlacementConnectionKind(fromNodeId: string, toNodeId: string, nodes: CanvasNodeData[]) {
+    return nodes.find((node) => node.id === toNodeId)?.metadata?.imageRef?.batchNodeId === fromNodeId ? "batch" as const : undefined;
+}
+
+// 仅在创建新分图或首次补齐批次时调用；已删除的持久化连线不能在渲染时重建。
+export function getImagePlacementConnections(nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasConnection[] {
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const existing = new Set(connections.map((connection) => `${connection.fromNodeId}\u0000${connection.toNodeId}`));
+    return nodes.flatMap((node) => {
+        const resource = getImagePlacementResource(node, nodeById);
+        if (!resource || existing.has(`${resource.batchNode.id}\u0000${node.id}`)) return [];
+        return [{ id: `batch-link:${node.id}`, fromNodeId: resource.batchNode.id, toNodeId: node.id, kind: "batch" as const }];
+    });
+}
+
+export function pruneImagePlacementConnections(nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    return connections.filter((connection) => {
+        if (connection.kind !== "batch") return true;
+        const target = nodeById.get(connection.toNodeId);
+        return target && getImagePlacementResource(target, nodeById)?.batchNode.id === connection.fromNodeId;
+    });
+}
+
+export function setImagePlacementAsPrimary(nodes: CanvasNodeData[], placementId: string) {
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const placement = nodeById.get(placementId);
+    const resource = placement && getImagePlacementResource(placement, nodeById);
+    if (!placement || !resource?.image.content) return nodes;
+    return nodes.map((node) => {
+        if (node.id !== resource.batchNode.id) return node;
+        const synced = syncBatchNodeImages(node, node.metadata!.images!, resource.image.id);
+        return { ...synced, position: node.position, width: placement.width, height: placement.height, metadata: { ...synced.metadata, freeResize: placement.metadata?.freeResize } };
+    });
+}
+
 export function materializeImagePlacementNode(node: CanvasNodeData, nodeById: ReadonlyMap<string, CanvasNodeData>) {
     const resolved = resolveImagePlacementNode(node, nodeById);
     if (!resolved.metadata?.imageRef) return resolved;
@@ -82,6 +137,7 @@ export function syncBatchNodeImages(node: CanvasNodeData, images: CanvasNodeImag
     const metadata: CanvasNodeMetadata = {
         ...node.metadata,
         images,
+        imageBatchExpanded: isImageBatchRoot(node) ? node.metadata?.imageBatchExpanded ?? false : undefined,
         count: images.length,
         status,
         errorDetails: status === "error" ? primary?.errorDetails || images.find((image) => image.errorDetails)?.errorDetails : undefined,
@@ -113,6 +169,7 @@ export function dissolveBatchNode(node: CanvasNodeData, image?: CanvasNodeImage)
             ...synced.metadata,
             images: undefined,
             primaryImageId: undefined,
+            imageBatchExpanded: undefined,
             count: image ? 1 : undefined,
             status,
             errorDetails: image?.status === "loading" ? undefined : image?.errorDetails,
@@ -138,28 +195,18 @@ export function planImagePlacementRemoval(nodes: CanvasNodeData[], ids: Readonly
         imageIds.add(imageId);
         removedImagesByBatchId.set(batchNodeId, imageIds);
     });
-    const closedBatchIds = new Set([...ids].filter((id) => nodes.some((node) => node.id === id && (node.metadata?.images?.length || 0) > 1)));
-    removedImagesByBatchId.forEach((imageIds, batchNodeId) => {
-        const count = nodes.find((node) => node.id === batchNodeId)?.metadata?.images?.filter((image) => !imageIds.has(image.id)).length || 0;
-        if (count <= 1) closedBatchIds.add(batchNodeId);
-    });
-    return { removedNodeIds, removedImagesByBatchId, closedBatchIds };
+    return { removedNodeIds, removedImagesByBatchId };
 }
 
 export function removeCanvasNodes(nodes: CanvasNodeData[], removedNodeIds: ReadonlySet<string>, removedImagesByBatchId: ReadonlyMap<string, ReadonlySet<string>>) {
-    const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    const dissolvedBatchIds = new Set<string>();
     const updated = nodes.flatMap((node) => {
         if (removedNodeIds.has(node.id)) return [];
         const removedImageIds = removedImagesByBatchId.get(node.id);
         if (!removedImageIds) return [node];
         const images = (node.metadata?.images || []).filter((image) => !removedImageIds.has(image.id));
-        if (images.length > 1) return [syncBatchNodeImages(node, images, node.metadata?.primaryImageId, removedImageIds.has(node.metadata?.primaryImageId || ""))];
-        dissolvedBatchIds.add(node.id);
-        return [dissolveBatchNode(node, images[0])];
+        return [retainBatchImages(node, images)];
     });
     return updated
-        .map((node) => (node.metadata?.imageRef && dissolvedBatchIds.has(node.metadata.imageRef.batchNodeId) ? materializeImagePlacementNode(node, nodeById) : node))
         .map((node) => {
             const groupId = node.metadata?.groupId;
             return groupId && removedNodeIds.has(groupId) ? { ...node, metadata: { ...node.metadata, groupId: undefined } } : node;
@@ -175,13 +222,17 @@ export function detachImagePlacementNode(nodes: CanvasNodeData[], nodeId: string
     const hasOtherPlacement = nodes.some((node) => node.id !== placement.id && node.metadata?.imageRef?.batchNodeId === batchNode.id && node.metadata.imageRef.imageId === image.id);
     if (hasOtherPlacement) return nodes.map((node) => (node.id === placement.id ? materializeImagePlacementNode(node, nodeById) : node));
     const remainingImages = (batchNode.metadata?.images || []).filter((item) => item.id !== image.id);
-    const dissolve = remainingImages.length <= 1;
     return nodes.map((node) => {
         if (node.id === placement.id) return materializeImagePlacementNode(node, nodeById);
-        if (node.id === batchNode.id) return dissolve ? dissolveBatchNode(node, remainingImages[0]) : syncBatchNodeImages(node, remainingImages, node.metadata?.primaryImageId, node.metadata?.primaryImageId === image.id);
-        if (dissolve && node.metadata?.imageRef?.batchNodeId === batchNode.id) return materializeImagePlacementNode(node, nodeById);
+        if (node.id === batchNode.id) return retainBatchImages(node, remainingImages);
         return node;
     });
+}
+
+function retainBatchImages(node: CanvasNodeData, images: CanvasNodeImage[]) {
+    const primary = node.metadata?.images?.find((image) => image.id === node.metadata?.primaryImageId) || node.metadata?.images?.[0];
+    const next = images.length ? syncBatchNodeImages(node, images) : dissolveBatchNode(node, primary);
+    return { ...next, position: node.position, width: node.width, height: node.height };
 }
 
 export function placementMetadata(imageRef: NonNullable<CanvasNodeMetadata["imageRef"]>, metadata?: CanvasNodeMetadata): CanvasNodeMetadata {

@@ -73,6 +73,7 @@ export type CanvasNodeMetadata = {
     freeResize?: boolean;
     images?: CanvasNodeImage[];
     primaryImageId?: string;
+    imageBatchExpanded?: boolean;
     imageRef?: CanvasImagePlacementRef;
     storageKey?: string;
     mimeType?: string;
@@ -99,6 +100,7 @@ export type CanvasConnection = {
     id: string;
     fromNodeId: string;
     toNodeId: string;
+    kind?: "batch";
 };
 
 export type CanvasAssistantReference = {

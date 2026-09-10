@@ -45,6 +45,7 @@ type CanvasConnection = {
   id: string;
   fromNodeId: string;
   toNodeId: string;
+  kind?: "batch";
 };
 
 type CanvasNodeImage = {
@@ -65,7 +66,7 @@ type CanvasImagePlacementRef = {
 };
 ```
 
-Node positions and sizes use canvas-world coordinates. Edges store only node IDs; their paths are calculated while rendering. Deleting a node removes its connected edges.
+Node positions and sizes use canvas-world coordinates. Edges store endpoint node IDs and an optional kind; their paths are calculated while rendering. `kind: "batch"` identifies a root-to-placement relation rather than a generation reference. Deleting a node removes its connected edges.
 
 Common metadata includes content, prompt, status, generation settings, natural dimensions, `storageKey`, MIME type, and byte size. Image and video `content` values are normally session-scoped `blob:` URLs; `storageKey` is the persistent identity.
 
@@ -75,18 +76,21 @@ Multi-image generation uses a hybrid structure:
 
 - The image root is the authoritative resource owner. Its `metadata.images[]` contains every requested image, per-image generation state, dimensions, MIME type, byte size, and `storageKey`.
 - `metadata.primaryImageId` selects the image mirrored into the root-level `content`, `storageKey`, dimensions, MIME type, and byte size. The first successful image becomes primary immediately.
+- `metadata.imageBatchExpanded` persists the root's expanded/collapsed state. Its presence also retains batch identity when only one candidate remains; an ordinary single-image result has no such field.
 - Every candidate is also represented by a real `CanvasNodeData` placement node. Its persisted metadata contains `imageRef: { batchNodeId, imageId }`, interaction fields such as `freeResize` and `groupId`, and optional per-placement prompt/config overrides; it does not duplicate image content or file metadata.
 - Rendering, the side panel, generation inputs, downloads, previews, and image tools resolve a placement's image data from the referenced root at runtime.
 
-Generating three images therefore creates four canvas frames: one resource root and three real placement nodes. The source connects only to the root; there are no internal root-to-placement `CanvasConnection` records. Placement nodes have stable IDs and independently persist position and size, so they can be selected, moved, resized, connected, copied, retried, and used through the full image toolbar.
+Generating three images therefore creates four canvas frames: one resource root and three real placement nodes. The source connects to the root, which has a persisted `kind: "batch"` connection to each placement. Placement nodes have stable IDs and independently persist position and size, so they can be selected, moved, resized, connected, copied, retried, and used through the full image toolbar.
 
-Expansion is UI state rather than project data. Collapsing a batch hides its placement nodes and their external edges without deleting either; expanding restores the saved geometry and edges. Moving the root moves every placement by the same delta, including hidden placements. Opening/canceling tools, editing prompts/configuration and deriving new images preserve the original reference. Only replacing the placement's media materializes it as an ordinary node and removes the original batch resource when no other placement references it.
+Batch lines share the normal connection selection, deletion and reconnection controls and are stored in `project.connections`. Their geometry follows the nodes, and collapse hides them with the placements. Deleting a line does not detach its placement's `imageRef` or stop linked movement; reopening or expanding the project must not recreate a deleted line. Manually reconnecting the root to its placement restores a batch line without duplicating endpoints. Batch lines are excluded from generation references.
 
-Deleting the root deletes its placements. Deleting a placement removes the referenced image resource only after the final placement for that image is removed. When one image remains, the batch is conservatively dissolved into ordinary image nodes so existing external edges remain valid. Copying or duplicating a root includes its placements and remaps `imageRef.batchNodeId`; a placement copied alone may continue sharing the original resource and `storageKey`.
+Expansion is saved in the root metadata and restored when reopening the project. Collapsing a batch hides its placement nodes and their edges without deleting either; expanding restores the saved geometry and remaining edges. Moving the root moves every placement by the same delta, including hidden placements. Selecting a placement as primary copies its width, height and `freeResize` setting to the root while preserving the root's top-left position and the placement's geometry. Opening/canceling tools, editing prompts/configuration and deriving new images preserve the original reference. Only replacing the placement's media materializes it as an ordinary node, removes its batch line, and removes the original batch resource when no other placement references it.
 
-Canvas Agent uses the same rules. Root movement shifts placements unless explicitly moved in the same operation batch; prompt/config changes stay on the placement; status and file-metadata corrections update its root resource; replacing content detaches. Snapshots resolve the referenced content, while undo snapshots retain the original storage structure.
+Deleting the root deletes its placements. Deleting a placement removes the referenced image resource only after the final placement for that image is removed. When one candidate remains, its batch identity, count control, folding, edges and linked movement remain intact. Deleting the final placement converts the root to an ordinary image while preserving the image it was displaying. Copying or duplicating a root includes its placements, remaining internal connections and expansion state, and remaps both `imageRef.batchNodeId` and connection endpoints. A placement copied alone may continue sharing the original resource and `storageKey`; its batch line is copied only if that line still exists.
 
-Projects saved by the legacy root/child batch structure are normalized when opened. Existing child IDs, geometry, storage metadata, primary selection, and external edges are retained as placement nodes, while obsolete root-to-child internal edges are removed. Current `images[]` projects missing placement nodes receive deterministic placements during the same normalization step.
+Canvas Agent uses the same rules, including primary selection geometry, line deletion/reconnection and single-candidate batches. Root movement shifts placements unless explicitly moved in the same operation batch; prompt/config changes stay on the placement; status and file-metadata corrections update its root resource; replacing content detaches. Snapshots resolve the referenced content, while undo snapshots retain the original storage structure.
+
+Projects saved by the legacy root/child batch structure are normalized when opened. Existing child IDs, geometry, storage metadata, primary selection, expansion state and edges are retained as placement nodes; existing root-to-child lines are marked `kind: "batch"`. Current `images[]` batches missing placement nodes receive deterministic placements. Only batches without a saved `imageBatchExpanded` field receive missing batch lines during first initialization and default to collapsed. Once that field exists, missing lines are treated as intentional deletions and are not recreated. Ordinary single-image results do not gain placement nodes or folding controls.
 
 ## Generation, groups and video tasks
 

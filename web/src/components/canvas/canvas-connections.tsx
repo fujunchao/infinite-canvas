@@ -29,9 +29,8 @@ export function ConnectionPath({
     const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
 
     return (
-        <g>
+        <g data-connection-id={connection.id} data-batch-connection={connection.kind === "batch" || undefined}>
             <path
-                data-connection-id={connection.id}
                 d={pathD}
                 stroke="transparent"
                 strokeWidth="16"

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type { ChangeEvent as ReactChangeEvent, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, SetStateAction } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Group, Video } from "lucide-react";
 import { saveAs } from "file-saver";
@@ -55,12 +55,19 @@ import {
     createImagePlacementNode,
     detachImagePlacementNode,
     getImagePlacementResource,
+    getImagePlacementConnections,
+    getExpandedImageBatchIds,
+    imagePlacementConnectionKind,
+    isImageBatchRoot,
     isImagePlacementHidden,
     placementMetadata,
     planImagePlacementRemoval,
+    pruneImagePlacementConnections,
     removeCanvasNodes,
     resolveImagePlacementNode,
     resolveImagePlacementNodes,
+    setImageBatchExpansion,
+    setImagePlacementAsPrimary,
     syncBatchNodeImages,
 } from "@/lib/canvas/canvas-image-placements";
 import {
@@ -276,7 +283,11 @@ function InfiniteCanvasPage() {
     const [titleEditing, setTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
-    const [expandedImageBatchIds, setExpandedImageBatchIds] = useState<Set<string>>(new Set());
+    const expandedBatchKey = JSON.stringify([...getExpandedImageBatchIds(nodes)]);
+    const expandedImageBatchIds = useMemo(() => new Set<string>(JSON.parse(expandedBatchKey)), [expandedBatchKey]);
+    const setExpandedImageBatchIds = useCallback((update: SetStateAction<Set<string>>) => {
+        setNodes((current) => setImageBatchExpansion(current, typeof update === "function" ? update(getExpandedImageBatchIds(current)) : update));
+    }, []);
     const [isNodeDragging, setIsNodeDragging] = useState(false);
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
@@ -660,7 +671,7 @@ function InfiniteCanvasPage() {
             const { fromNodeId, toNodeId } = connection;
             const exists = connectionsRef.current.some((conn) => conn.fromNodeId === fromNodeId && conn.toNodeId === toNodeId);
             if (!exists) {
-                setConnections((prev) => [...prev, { id: `conn-${Date.now()}`, fromNodeId, toNodeId }]);
+                setConnections((prev) => [...prev, { id: `conn-${Date.now()}`, fromNodeId, toNodeId, kind: imagePlacementConnectionKind(fromNodeId, toNodeId, nodesRef.current) }]);
             }
             setContextMenu(null);
         },
@@ -804,6 +815,7 @@ function InfiniteCanvasPage() {
     const connectedNodesByNodeId = useMemo(() => {
         const map = new Map<string, CanvasNodeData[]>();
         connections.forEach((connection) => {
+            if (connection.kind === "batch") return;
             const source = nodeById.get(connection.fromNodeId);
             if (!source) return;
             const connected = map.get(connection.toNodeId);
@@ -880,9 +892,8 @@ function InfiniteCanvasPage() {
     const deleteNodes = useCallback(
         (ids: Set<string>) => {
             if (!ids.size) return;
-            const { removedNodeIds: allIds, removedImagesByBatchId, closedBatchIds } = planImagePlacementRemoval(nodesRef.current, ids);
+            const { removedNodeIds: allIds, removedImagesByBatchId } = planImagePlacementRemoval(nodesRef.current, ids);
             setNodes((prev) => removeCanvasNodes(prev, allIds, removedImagesByBatchId));
-            setExpandedImageBatchIds((current) => new Set([...current].filter((id) => !closedBatchIds.has(id))));
             setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
             setSelectedNodeIds(new Set());
             setSelectedConnectionId(null);
@@ -958,7 +969,7 @@ function InfiniteCanvasPage() {
         if (!referencePickerNodeId || referenceConnectedNodeIds.has(fromNodeId)) return;
         const source = nodeById.get(fromNodeId);
         if (!source || !isCanvasReferenceNode(source, nodesRef.current)) return;
-        setConnections((prev) => [...prev, { id: nanoid(), fromNodeId, toNodeId: referencePickerNodeId }]);
+        setConnections((prev) => prev.some((connection) => connection.fromNodeId === fromNodeId && connection.toNodeId === referencePickerNodeId) ? prev : [...prev, { id: nanoid(), fromNodeId, toNodeId: referencePickerNodeId, kind: imagePlacementConnectionKind(fromNodeId, referencePickerNodeId, nodesRef.current) }]);
     }, [nodeById, referenceConnectedNodeIds, referencePickerNodeId]);
 
     useEffect(() => {
@@ -1015,7 +1026,7 @@ function InfiniteCanvasPage() {
         if (!source) return;
         const sourceNodes = [
             source,
-            ...((source.metadata?.images?.length || 0) > 1 ? nodesRef.current.filter((node) => node.metadata?.imageRef?.batchNodeId === source.id) : []),
+            ...(isImageBatchRoot(source) ? nodesRef.current.filter((node) => node.metadata?.imageRef?.batchNodeId === source.id) : []),
         ];
         const timestamp = Date.now();
         const idMap = new Map(sourceNodes.map((node, index) => [node.id, `${node.type}-${timestamp}-${index}-${Math.random().toString(36).slice(2, 7)}`]));
@@ -1038,8 +1049,11 @@ function InfiniteCanvasPage() {
         const duplicatedRootId = idMap.get(source.id)!;
 
         setNodes((prev) => [...prev, ...duplicatedNodes]);
-        const duplicatedBatchIds = duplicatedNodes.flatMap((node) => (node.metadata?.imageRef ? [node.metadata.imageRef.batchNodeId] : (node.metadata?.images?.length || 0) > 1 ? [node.id] : []));
-        if (duplicatedBatchIds.length) setExpandedImageBatchIds((current) => new Set([...current, ...duplicatedBatchIds]));
+        const duplicatedConnections = connectionsRef.current
+            .filter((connection) => idMap.has(connection.toNodeId) && (idMap.has(connection.fromNodeId) || connection.kind === "batch"))
+            .map((connection) => ({ ...connection, id: nanoid(), fromNodeId: idMap.get(connection.fromNodeId) || connection.fromNodeId, toNodeId: idMap.get(connection.toNodeId)! }));
+        setConnections((prev) => [...prev, ...duplicatedConnections]);
+        if (source.metadata?.imageRef) setExpandedImageBatchIds((current) => new Set(current).add(source.metadata!.imageRef!.batchNodeId));
         setSelectedNodeIds(new Set([duplicatedRootId]));
         setSelectedConnectionId(null);
         if (source.type !== CanvasNodeType.Group) setDialogNodeId(duplicatedRootId);
@@ -1051,7 +1065,7 @@ function InfiniteCanvasPage() {
 
         const copiedIds = new Set(selectedIds);
         nodesRef.current.forEach((node) => {
-            if (!selectedIds.has(node.id) || (node.metadata?.images?.length || 0) <= 1) return;
+            if (!selectedIds.has(node.id) || !isImageBatchRoot(node)) return;
             nodesRef.current.forEach((placement) => {
                 if (placement.metadata?.imageRef?.batchNodeId === node.id) copiedIds.add(placement.id);
             });
@@ -1075,7 +1089,7 @@ function InfiniteCanvasPage() {
 
         clipboardRef.current = {
             nodes: copiedNodes,
-            connections: connectionsRef.current.filter((connection) => copiedIds.has(connection.fromNodeId) && copiedIds.has(connection.toNodeId)).map((connection) => ({ ...connection })),
+            connections: connectionsRef.current.filter((connection) => copiedIds.has(connection.toNodeId) && (copiedIds.has(connection.fromNodeId) || connection.kind === "batch")).map((connection) => ({ ...connection })),
         };
     }, []);
 
@@ -1132,7 +1146,7 @@ function InfiniteCanvasPage() {
         });
 
         const nextConnections = clipboard.connections.flatMap((connection, index) => {
-            const fromNodeId = idMap.get(connection.fromNodeId);
+            const fromNodeId = idMap.get(connection.fromNodeId) || (connection.kind === "batch" && nodesRef.current.some((node) => node.id === connection.fromNodeId) ? connection.fromNodeId : undefined);
             const toNodeId = idMap.get(connection.toNodeId);
             if (!fromNodeId || !toNodeId) return [];
             return [
@@ -1147,7 +1161,8 @@ function InfiniteCanvasPage() {
 
         setNodes((prev) => [...prev, ...pastedNodes]);
         setConnections((prev) => [...prev, ...nextConnections]);
-        const pastedBatchIds = pastedNodes.flatMap((node) => (node.metadata?.imageRef ? [node.metadata.imageRef.batchNodeId] : (node.metadata?.images?.length || 0) > 1 ? [node.id] : []));
+        const pastedRootIds = new Set(pastedNodes.filter(isImageBatchRoot).map((node) => node.id));
+        const pastedBatchIds = pastedNodes.flatMap((node) => node.metadata?.imageRef && !pastedRootIds.has(node.metadata.imageRef.batchNodeId) ? [node.metadata.imageRef.batchNodeId] : []);
         if (pastedBatchIds.length) setExpandedImageBatchIds((current) => new Set([...current, ...pastedBatchIds]));
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
@@ -1779,26 +1794,15 @@ function InfiniteCanvasPage() {
     }, [expandedImageBatchIds]);
 
     const setBatchPrimary = useCallback((placement: CanvasNodeData) => {
-        const imageRef = placement.metadata?.imageRef;
-        if (!imageRef) return;
-        setNodes((prev) =>
-            prev.map((node) => {
-                if (node.id !== imageRef.batchNodeId) return node;
-                const images = node.metadata?.images;
-                return images?.some((image) => image.id === imageRef.imageId && image.content) ? syncBatchNodeImages(node, images, imageRef.imageId, true) : node;
-            }),
-        );
+        setNodes((prev) => setImagePlacementAsPrimary(prev, placement.id));
     }, []);
 
     const detachImagePlacement = useCallback((nodeId: string) => {
         const snapshot = nodesRef.current;
-        const nodeById = new Map(snapshot.map((node) => [node.id, node]));
-        const placement = nodeById.get(nodeId);
-        const resource = placement ? getImagePlacementResource(placement, nodeById) : null;
-        if (!placement || !resource) return;
-        const hasOtherPlacement = snapshot.some((node) => node.id !== placement.id && node.metadata?.imageRef?.batchNodeId === resource.batchNode.id && node.metadata.imageRef.imageId === resource.image.id);
-        setNodes((prev) => detachImagePlacementNode(prev, nodeId));
-        if (!hasOtherPlacement && (resource.batchNode.metadata?.images?.length || 0) <= 2) setExpandedImageBatchIds((current) => new Set([...current].filter((id) => id !== resource.batchNode.id)));
+        const next = detachImagePlacementNode(snapshot, nodeId);
+        if (next === snapshot) return;
+        setNodes(next);
+        setConnections((current) => pruneImagePlacementConnections(next, current));
     }, []);
 
     const openTextEditor = useCallback((node: CanvasNodeData) => {
@@ -2408,6 +2412,7 @@ function InfiniteCanvasPage() {
                     const isConfigNode = sourceNode?.type === CanvasNodeType.Config;
                     const isImageNode = sourceNode?.type === CanvasNodeType.Image;
                     const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
+                    const batchGeneration = count > 1 || (isEmptyImageNode && Boolean(rawSourceNode && isImageBatchRoot(rawSourceNode)));
                     const sourceReference =
                         isImageNode && sourceNode?.metadata?.content
                             ? [{ id: sourceNode.id, name: `${sourceNode.title || sourceNode.id}.png`, type: sourceNode.metadata.mimeType || "image/png", dataUrl: sourceNode.metadata.content, storageKey: sourceNode.metadata.storageKey }]
@@ -2435,6 +2440,7 @@ function InfiniteCanvasPage() {
                             prompt: effectivePrompt,
                             status: NODE_STATUS_LOADING,
                             images: initialImages,
+                            imageBatchExpanded: batchGeneration ? true : undefined,
                             ...generationMetadata,
                         },
                     };
@@ -2446,7 +2452,7 @@ function InfiniteCanvasPage() {
                     });
                     const reusedPlacementIds = new Set<string>();
                     const placementNodes =
-                        count > 1
+                        batchGeneration
                             ? initialImages.flatMap((image, index) => {
                                   const previousImageId = rawSourceNode?.metadata?.images?.[index]?.id;
                                   const reusable = previousImageId ? existingPlacementsByImageId.get(previousImageId) || [] : [];
@@ -2507,16 +2513,14 @@ function InfiniteCanvasPage() {
                         ...(isEmptyImageNode ? [] : [rootNode]),
                         ...placementNodes.filter((node) => !currentNodeById.has(node.id)),
                     ]);
-                    if (!isEmptyImageNode || obsoletePlacementIds.size)
-                        setConnections((prev) => [
-                            ...prev.filter((connection) => !obsoletePlacementIds.has(connection.fromNodeId) && !obsoletePlacementIds.has(connection.toNodeId)),
+                    setConnections((prev) => {
+                        const retained = prev.filter((connection) => !obsoletePlacementIds.has(connection.fromNodeId) && !obsoletePlacementIds.has(connection.toNodeId));
+                        const created = placementNodes.filter((node) => !currentNodeById.has(node.id));
+                        return [
+                            ...retained,
                             ...(isEmptyImageNode ? [] : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]),
-                        ]);
-                    setExpandedImageBatchIds((current) => {
-                        const next = new Set(current);
-                        if (count > 1) next.add(rootId);
-                        else next.delete(rootId);
-                        return next;
+                            ...getImagePlacementConnections([rootNode, ...created], retained),
+                        ];
                     });
                     setSelectedNodeIds(new Set([nodeId]));
                     setSelectedConnectionId(null);

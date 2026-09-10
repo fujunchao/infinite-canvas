@@ -1,7 +1,7 @@
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { detachImagePlacementNode, planImagePlacementRemoval, removeCanvasNodes, syncBatchNodeImages } from "@/lib/canvas/canvas-image-placements";
+import { detachImagePlacementNode, imagePlacementConnectionKind, planImagePlacementRemoval, pruneImagePlacementConnections, removeCanvasNodes, setImagePlacementAsPrimary, syncBatchNodeImages } from "@/lib/canvas/canvas-image-placements";
 import { getNodeSpec, isRegisteredNodeType } from "@/lib/canvas/node-registry";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeImage, type CanvasNodeMetadata, type CanvasNodeTypeId, type ViewportTransform } from "@/types/canvas";
 
@@ -76,13 +76,21 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             const current = nodes.find((node) => node.id === op.id);
             if (!current) return;
             let updated: CanvasNodeData = { ...current, ...op.patch, metadata: { ...current.metadata, ...metadataPatch } };
-            if (updated.metadata?.images?.length) updated = syncBatchNodeImages(updated, updated.metadata.images, updated.metadata.primaryImageId, Object.prototype.hasOwnProperty.call(metadataPatch, "primaryImageId"));
+            if (updated.metadata?.images?.length) {
+                const position = updated.position;
+                updated = syncBatchNodeImages(updated, updated.metadata.images, updated.metadata.primaryImageId, Object.prototype.hasOwnProperty.call(metadataPatch, "primaryImageId"));
+                if (metadataPatch.primaryImageId) updated = { ...updated, position };
+            }
             const dx = op.patch?.position ? op.patch.position.x - current.position.x : 0;
             const dy = op.patch?.position ? op.patch.position.y - current.position.y : 0;
             nodes = nodes.map((node) => {
                 if (node.id === op.id) return updated;
                 return (dx || dy) && !explicitlyMovedNodeIds.has(node.id) && node.metadata?.imageRef?.batchNodeId === op.id ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } } : node;
             });
+            if (metadataPatch.primaryImageId) {
+                const placement = nodes.find((node) => node.metadata?.imageRef?.batchNodeId === op.id && node.metadata.imageRef.imageId === metadataPatch.primaryImageId);
+                if (placement) nodes = setImagePlacementAsPrimary(nodes, placement.id);
+            }
         }
         if (op.type === "delete_node") {
             const ids = new Set(op.ids || (op.id ? [op.id] : op.nodeType ? nodes.filter((node) => node.type === op.nodeType).map((node) => node.id) : []));
@@ -99,13 +107,13 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             if (!op.fromNodeId || !op.toNodeId) return;
             const exists = connections.some((conn) => conn.fromNodeId === op.fromNodeId && conn.toNodeId === op.toNodeId);
             const hasNodes = nodes.some((node) => node.id === op.fromNodeId) && nodes.some((node) => node.id === op.toNodeId);
-            if (!exists && hasNodes) connections = [...connections, { id: op.id || nanoid(), fromNodeId: op.fromNodeId, toNodeId: op.toNodeId }];
+            if (!exists && hasNodes) connections = [...connections, { id: op.id || nanoid(), fromNodeId: op.fromNodeId, toNodeId: op.toNodeId, kind: imagePlacementConnectionKind(op.fromNodeId, op.toNodeId, nodes) }];
         }
         if (op.type === "set_viewport" && op.viewport) viewport = op.viewport;
         if (op.type === "select_nodes") selectedNodeIds = (op.ids || []).filter((id) => nodes.some((node) => node.id === id));
     });
 
-    return { ...snapshot, nodes, connections, selectedNodeIds, viewport };
+    return { ...snapshot, nodes, connections: pruneImagePlacementConnections(nodes, connections), selectedNodeIds, viewport };
 }
 
 function opLabel(type: string) {

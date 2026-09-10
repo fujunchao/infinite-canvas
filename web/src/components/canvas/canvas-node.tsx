@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ChevronRight, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isImageBatchRoot } from "@/lib/canvas/canvas-image-placements";
 import { formatBytes } from "@/lib/image-utils";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { buildNodeContext } from "@/lib/canvas/plugin-node-context";
@@ -125,7 +126,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
     const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : 0;
-    const isBatchRoot = batchCount > 1;
+    const isBatchRoot = isImageBatchRoot(data);
     // Nodes with the interaction/move toggle ignore content pointer events in move mode and allow interaction in interactive mode.
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
     const supportsInteractionToggle = Boolean(definition?.interactionToggle);
