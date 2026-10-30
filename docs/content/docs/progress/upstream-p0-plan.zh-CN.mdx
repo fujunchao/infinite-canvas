@@ -1,0 +1,611 @@
+---
+title: 上游 P0 修复点采计划
+description: 从上游 v0.19.0 / v0.20.0 点采 4 个 P0 修复的实施计划，包含根因、改动点、测试、验收与文档草稿
+---
+
+# 上游 P0 修复点采计划
+
+> 状态：**已实施（v0.18.4）**。本文保留实施前的分析与验收口径；实际改动见 CHANGELOG 与 v0.18.4 提交。
+>
+> 基线：本仓库 `v0.18.3`（`e866dce`），上游 `v0.20.0`（`3a6b64b`）。文中行号以 v0.18.3 为准，实施前请重新定位。
+
+## 一、背景与结论
+
+上游在 v0.18.0 之后发布了两个版本：
+
+- **v0.19.0**（2026-09-16，13 个提交）：WebP 缩略图、图片请求 10 分钟超时、ZCode 插件、hover 按钮、拖拽与连线性能。
+- **v0.20.0**（2026-10-10，40 个提交）：模型静默回退修复、画布尺寸测量修复、居中聚焦、元素列表缩略图视图、原地重生成偏好、图片质量五档与分辨率解耦、默认分辨率设置、存储统计降级等。
+
+本仓库与上游在画布多图结构上已经分叉（本仓库是「资源根节点 + 真实放置节点」，上游是「单节点 + 候选卡片」，`project.tsx` 双方相差约 1500 行），**不适合整版合并**。因此只点采 4 个与画布批次架构无关、且在本仓库确实存在问题或缺失的修复。
+
+## 二、P0 范围
+
+| 编号 | 内容 | 上游来源 | 价值 | 改动量 |
+| --- | --- | --- | --- | --- |
+| P0-1 | 图片请求超时 | v0.19.0 `f84f3ff` | 接口挂起时不再永远停在「生成中」 | 约 10 行 |
+| P0-2 | 画布尺寸测量失效修复 | v0.20.0 `99bb4b3` | 聚焦 / 重置视图 / 中心缩放 / 小地图定位准确 | 4 行 |
+| P0-3 | 模型与渠道被删后静默回退修复 | v0.20.0 `e74a497`（PR #252） | 不会把请求发到未选择的渠道，并修掉原渠道被删后视频重试的死循环 | 约 20 行 + 测试 |
+| P0-4 | 本地存储统计降级 | v0.20.0 `fb061e8`（PR #284） | 不支持 Storage API 时配置页不再整块报错 | 约 30 行 |
+
+明确**不做**：整版合并上游、替换多图/批次实现、引入 pnpm workspace、移除 Ark / Seedance、ZCode 插件、缩略图管线、居中聚焦、复制参考连线、质量与分辨率体系（见第十一节）。
+
+## 三、总原则与完成定义
+
+1. 最小改动：每项只动必要文件，不顺手重构，不改数据结构，不加数据迁移。
+2. 独立可回滚：四项互不依赖，任何一项都可以单独 cherry-pick 或 revert。
+3. 不改版本号、不发版；完成后由维护者决定是否发 `v0.18.4`。
+4. **完成定义（每项都适用）**：代码改动 + 对应测试 + `bun test` 通过 + `bun run typecheck` 无新增错误 + 手测清单勾选 + 文档草稿更新。
+5. 文案中英文同时补齐；新增 i18n 键与上游同名，方便后续同步。
+
+## 四、P0-1 图片请求超时
+
+### 4.1 问题与证据
+
+`web/src/services/api/image.ts` 的所有请求只透传 `AbortSignal`，没有设置 `timeout`。上游渠道长时间不返回时，请求一直挂起，节点停在「生成中」，用户只能手动停止。
+
+本仓库的出网调用盘点（只列与本次相关部分）：
+
+| # | 调用 | 位置 | 传输 | 现有超时 | 本计划 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 文生图 `/images/generations` | `image.ts:745` | axios | 无 | **加 10 分钟** |
+| 2 | Ark 编辑 `/images/generations`（fork 独有） | `image.ts:811` | axios | 无 | **加 10 分钟** |
+| 3 | 图生图 / 蒙版 `/images/edits` | `image.ts:862` | axios | 无 | **加 10 分钟** |
+| 4 | Gemini 生图 `:generateContent` | `image.ts:684` | axios | 无 | **加 10 分钟** |
+| 5 | 流式文本 `/responses` | `image.ts:490` | fetch | 无 | 不做（见 4.5） |
+| 6 | 流式文本 Gemini SSE | `image.ts:597` | fetch | 无 | 不做（见 4.5） |
+| 7 | 模型列表 `GET /models` | `image.ts:911`、`:918` | axios | 无 | 不做（见 4.5） |
+| 8 | 自定义脚本通道 | `model-plugin.ts:50`、`:71` | axios | 无 | 不做（见 4.5） |
+
+参考：图片下载与解码已有超时（`image-storage.ts:20-22`，10 分钟 / 10 秒），本次的超时值与之对齐。
+
+### 4.2 上游做法与 axios 语义
+
+`f84f3ff` 的做法：新增 `IMAGE_REQUEST_TIMEOUT_MS = 10 * 60_000`，给三处 axios 加 `timeout`，并在 `readAxiosError` 里把超时映射成 `apiErrors.imageTimeout`。
+
+需要理解的 axios 1.16 行为：
+
+- 浏览器 XHR 适配器把 `timeout` 设为整请求总时长（send → readyState=4），包含同源排队、上传、服务端等待与响应体下载，不是「首字节前」。
+- 超时默认产生 `ECONNABORTED`（`transitional.clarifyTimeoutError` 未开启时不会是 `ETIMEDOUT`）。
+- `signal` 取消走另一条路，产生 `CanceledError`（`ERR_CANCELED`），`axios.isCancel()` 为真。
+- 因此 **`isCancel` 判断必须排在超时判断之前**，否则用户点「停止」会显示成「请求超时」。
+
+### 4.3 实施方案
+
+`image.ts` 常量区（`IMAGE_OUTPUT_FORMAT` 之后）新增：
+
+```ts
+// 与 image-storage 的下载/解码超时同级：接口挂起时节点不会一直停在生成中。
+const IMAGE_REQUEST_TIMEOUT_MS = 10 * 60_000;
+```
+
+四处 axios 增加 `timeout`（与现有 `signal` 同对象）：
+
+| 位置 | 改动 |
+| --- | --- |
+| `image.ts:690` | `{ headers: geminiHeaders(config), signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS }` |
+| `image.ts:758-761` | 选项对象追加 `timeout: IMAGE_REQUEST_TIMEOUT_MS` |
+| `image.ts:824-827` | 同上（Ark 分支，上游没有，本仓库自行补） |
+| `image.ts:862` | 单行选项追加 `timeout: IMAGE_REQUEST_TIMEOUT_MS` |
+
+错误映射（`image.ts:299-314` 的 `readAxiosError`）：
+
+```ts
+if (axios.isCancel(error)) return apiText("requestCanceled");
+if (axios.isAxiosError(error) && (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT")) {
+    return apiText("imageTimeout");
+}
+if (axios.isAxiosError(error)) { /* 原逻辑不变 */ }
+```
+
+i18n（键名与上游一致）：
+
+- `web/src/i18n/locales/zh-CN.ts` 的 `apiErrors`：`imageTimeout: "生图请求超时，接口长时间没有返回，请稍后重试或更换渠道"`。
+- `en-US.ts` 同键：`"The image request timed out. The endpoint did not respond in time; retry later or switch channels."`
+
+### 4.4 行为与错误映射
+
+| 场景 | 现状 | 改后 |
+| --- | --- | --- |
+| 用户点停止 | `requestCanceled`，节点回 idle | 不变 |
+| 10 分钟无响应 | 一直 loading | 节点 error +「生图请求超时」，重试可用 |
+| 正常慢请求（4K、多参考图） | 成功 | 成功（10 分钟远大于常规耗时） |
+| 浏览器导航导致 XHR abort | 英文 `Request aborted` | 会被映射为超时（稀有，可接受） |
+
+UI 不需要新增：`metadata.errorDetails` 已在节点正文显示（`canvas-node.tsx` 错误态），重试走 `handleRetryNode`；工作台侧 `FailedImageCard` 同理。硬要求是**超时文案不能等于取消文案**，否则会被 `isGenerationCanceled`（`web/src/lib/canvas/canvas-generation-helpers.ts:137`）当成取消吞掉。
+
+### 4.5 明确不在本轮
+
+- **流式请求**（`image.ts:490`、`:597`）：fetch 没有 timeout，给整条流设总时长会误杀长文本/长思考。要做只能做「响应头前 10 分钟」guard，且超时必须抛非 `AbortError` 的命名错误（否则被 `isGenerationCanceled` 吞掉导致节点永久 loading）。风险与收益不匹配，列为后续 P1-1。
+- **视频创建与轮询**：创建请求正常 1~3 秒，不应共用 10 分钟；真正的问题是「创建挂起时 120 次轮询上限根本开始不了」，应单独用 60 秒常量，列为 P1-2。
+- **模型列表**：`GET /models` 挂起会让选择弹窗一直转圈，建议 30 秒，但属于配置体验，列为 P1-3。
+- **自定义脚本通道**：脚本可自设 timeout，且影响四种能力，需单独回归，列为 P1-4。
+
+### 4.6 风险
+
+1. 10 分钟偏长：最坏一张图 20 分钟（生成 10 + 下载 10）。可接受——用户随时能停止，本次目标是「防挂死」而非「提速」。
+2. 预算包含上传与同源排队：编辑请求把多张参考图放进 FormData，慢上行会吃掉部分预算；gemini 并发 count 次时后发请求先耗排队时间。
+3. 本地代理链路没有第二个超时（`canvas-proxy` 无业务超时、nginx 只托管静态文件），不会叠加。
+4. 上线后可按 `errorDetails` 中 `imageTimeout` 的占比观察，必要时提高阈值；常量集中一处，调整成本低。
+
+### 4.7 测试与验收
+
+自动化：超时时长没有可注入时钟，且 `image.ts` 依赖链较重（localforage/i18n），不建议为它引入 axios adapter 替换；以手测为准。
+
+手测（临时把常量改成 3000ms 验证，验完还原）：
+
+1. 把渠道 Base URL 指向一个「接受连接但不返回」的本地地址，触发一次生图。
+2. 3 秒后节点应变为错误态、显示「生图请求超时」、重试按钮可用、`message.error` 只弹一次。
+3. 在 3 秒内点停止，必须显示「请求已取消」并回到 idle，不能出现超时文案。
+4. 正常路径各跑一次：gpt-image 生图、Gemini 生图、带参考图编辑、Ark 编辑、脚本渠道生图。
+5. 切到英文界面，确认同一条错误显示英文。
+6. 正式验收用 10 分钟常量跑一次慢服务（约 11 分钟），确认链路真实生效。
+
+### 4.8 回滚
+
+只涉及 `image.ts` 与两个 locale 文件，revert 即恢复。
+
+## 五、P0-2 画布尺寸测量失效
+
+### 5.1 根因
+
+`web/src/pages/canvas/project.tsx:607-624` 的尺寸测量 `useEffect` 使用空依赖数组：
+
+- 组件首次挂载时 `projectLoaded = false`，`:3106` 直接返回 `CanvasRefreshShell`，画布容器 `InfiniteCanvas`（`:3137` 传入 `containerRef`）尚未渲染，`containerRef.current` 为 null。
+- effect 里 `:609` 早退，`ResizeObserver` 从未创建；空依赖又让它永远不会重跑。
+- 结果是 `size` 永久停留在 `:251` 的默认值 `{ width: 1200, height: 720 }`，直到刷新页面。
+- 全仓只有这一处观察画布尺寸（其余 3 处 `ResizeObserver` 都不是画布容器），没有任何补偿路径。
+
+`:212` 的 `didInitialCenterRef` 与 `:614-617` 的首次居中因此是**死代码**：当前版本「初始居中」根本不存在，初始视口唯一来源是 `:507` 的项目恢复。
+
+### 5.2 影响面
+
+| 位置 | 用途 | 错值后果 |
+| --- | --- | --- |
+| `:638-641` `getCanvasCenter` | 新节点落点 | 偏左上 |
+| `:1174-1177` `resetViewport` | 重置视图 | 世界原点不在画布中心 |
+| `:1179-1208` `focusNode` | 侧栏点击聚焦 | 节点不居中，缩放比例也按错尺寸算 |
+| `:1212-1223` `setZoomScale` | 以容器中心缩放 | 缩放锚点漂移 |
+| `:3314` 小地图 | 视口框与点击定位 | 比例错误、点击跳转不居中 |
+| `:2164-2169`、`:2950-3021` | 导入与助手插入落点 | 偏移 |
+| `:747-758` 视口裁剪 | 只渲染可见节点 | **不受影响**：优先用实时 `getBoundingClientRect` |
+
+### 5.3 上游补丁与「必须成对」的反证
+
+`99bb4b3` 改了一个文件（+2/−6）：
+
+1. 删除 `didInitialCenterRef` 声明。
+2. effect 首行加 `if (!projectLoaded) return;`。
+3. 删除 `updateSize` 里的首次居中分支。
+4. 依赖由 `[]` 改为 `[projectLoaded]`。
+
+**只加依赖不删居中会怎样**：项目恢复完成（`setViewport(project.viewport)` 之后）effect 重跑，居中分支会把视口覆盖成容器中心；紧接着 `:581-591` 的 500ms 视口保存定时器把被覆盖的值写回项目——**每次打开项目，平移和缩放都会被重置并持久化**，属于数据级回归。所以这两步必须同一次提交完成。
+
+### 5.4 实施方案
+
+只改 `web/src/pages/canvas/project.tsx`：
+
+1. 删除 `:212` 的 `const didInitialCenterRef = useRef(false);`。
+2. `:607` 的 effect 首行增加 `if (!projectLoaded) return;`。
+3. 删除 `:614-617` 的首次居中代码块。
+4. `:624` 的依赖数组改为 `[projectLoaded]`。
+
+改后形态：
+
+```ts
+useEffect(() => {
+    if (!projectLoaded) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const updateSize = () => {
+        const rect = el.getBoundingClientRect();
+        setSize({ width: rect.width, height: rect.height });
+    };
+    updateSize();
+    const resizeObserver = new ResizeObserver(updateSize);
+    resizeObserver.observe(el);
+    return () => resizeObserver.disconnect();
+}, [projectLoaded]);
+```
+
+### 5.5 时序验证（为什么不会互相覆盖）
+
+1. 首次渲染：`projectLoaded = false`，effect 直接返回，不注册观察器。
+2. 项目恢复：`restore()` 写入节点、连线、`viewport`（`:507`），最后 `setProjectLoaded(true)`（`:522`）。
+3. 重新渲染：容器挂载，`containerRef` 指向真实元素。
+4. effect 因依赖变化执行：量出真实尺寸并 `setSize`，**不再写 viewport**。
+5. `setSize` 触发重渲染：`viewport` 未变，effect 不重跑，观察器保持连接。
+6. 切换项目：`projectLoaded` 先 false 再 true，cleanup 断开旧观察器、重新测量。
+7. 窗口 resize、侧栏展开收起（500ms 宽度动画）、Agent 面板开关：均由 `ResizeObserver` 触发更新。
+
+结论：`size` 只由测量 effect 写，`viewport` 只由项目恢复与用户交互写，两者解耦。
+
+### 5.6 初始视口决策（D1）
+
+当前 bug 状态下，新建项目视口就是 `{x:0,y:0,k:1}`（`use-canvas-store.ts:42,89`），「首次居中」从未执行。修复后行为完全一致：
+
+- 已有项目：严格恢复保存的视口。
+- 新建空项目：视口 `{0,0,1}`，第一个节点仍落在容器中心（`getCanvasCenter` 用实时 rect）。
+
+因此本计划**不改初始视口行为**。若产品希望「新空项目进入时原点居中」，应另立需求：给项目增加 `viewportInitialized` 标记，测量完成后只对未初始化项目居中并写回——不要在组件里恢复 ref 居中，否则会被项目恢复覆盖并持久化。
+
+### 5.7 可选取整加固（建议单独提交）
+
+面板动画期间 `ResizeObserver` 每帧回调会 `setSize`，500ms 约 30 次整页重渲染。建议在 `updateSize` 内取整并做等值守卫：
+
+```ts
+const width = Math.round(rect.width);
+const height = Math.round(rect.height);
+if (!width || !height) return;
+setSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }));
+```
+
+与上游差异隔离，便于后续同步；即使不做也不影响 P0 结论。
+
+### 5.8 风险
+
+| # | 风险 | 结论 |
+| --- | --- | --- |
+| R1 | 首次测量发生在绘制后的 effect，存在一帧 `size=1200×720` | 无可见影响：变换只用 `viewport`，裁剪优先用实时 rect，小地图默认关闭 |
+| R2 | 侧栏入场动画首帧宽度偏小 | 观察器一两帧内纠正；居中已删，偏值不会写进视口 |
+| R3 | 面板动画期间频繁 `setSize` | 用 5.7 的取整与等值守卫缓解 |
+| R4 | 只加依赖不删居中 | 数据级回归，必须同提交（见 5.3） |
+| R5 | StrictMode 双执行 | cleanup 会 disconnect，无泄漏 |
+| R6 | 改动 `:2164-2169` 等 4 处 `rect.left + size.width/2` | **不要改**：`size` 修好后自动正确，改了只扩大后续合并冲突面 |
+
+### 5.9 测试与验收
+
+自动化：effect 是否注册无法在 bun（无 DOM/布局）中验证。可选两条路：
+
+- 把视口数学抽成纯函数（`resetViewportFor(size)`、`focusViewportForNode(node,size)`、`zoomAtCenter(viewport,size,scale)`）并补 3~5 个用例，锁住「size 是外部输入」的数学；这属于小重构，建议随 P1 的居中聚焦一起做。
+- 或加一条廉价的源码文本断言，检查 effect 片段同时包含 `if (!projectLoaded) return;` 与 `}, [projectLoaded]);`，防止未来被改回去（脆弱，团队可自行取舍）。
+
+手测（建议固定窗口 1440×900，先用 DevTools 记录画布容器真实 rect）：
+
+1. 打开被拖动过视口的项目，刷新后视口与上次一致，不被重置。
+2. 点击「重置视图」，世界原点位于画布可视区中心。
+3. 侧栏列表点击节点聚焦，节点中心落在可视区中心。
+4. 收起/展开侧栏后再聚焦，仍准确（证明尺寸随布局更新）。
+5. 打开小地图，视口框比例与真实画布一致；点击角落能定位到对应世界坐标。
+6. 缩放滑杆以中心为锚点缩放。
+7. 拖拽/粘贴/导入（无目标节点）时新节点出现在画布中心。
+8. 窗口 resize 后重复 2、3、6。
+9. 新建项目 → 从工具栏添加节点 → 出现在中心。
+10. 关闭/打开 Agent 面板后重复 2、3。
+
+## 六、P0-3 模型与渠道被删后静默回退
+
+### 6.1 问题与证据
+
+`web/src/stores/use-config-store.ts` 有两处会「悄悄换成别的模型或渠道」：
+
+- `resolveModelForCapability`（`:180-186`）：当前模型无法解析能力时，依次回落到默认模型与 `defaultConfig` 的硬编码模型。
+- `isAiConfigReady`（`:198-200`）：用 `resolveModelChannel` 判断，而 `resolveModelChannel`（`:417-422`）找不到匹配渠道时返回 `channels[0]`。
+
+结果：用户删除渠道或模型后，下一次生成可能被发到第一个渠道，使用用户没有选择的 Key 与 Base URL，界面没有任何提示。
+
+在仓库外用上游测试用例跑本仓库源码（基线 `e866dce`）的实测结果：
+
+- 8 条上游断言里 **3 通过 / 5 失败**，失败项正好是「已删渠道被替换」「删模型后仍能重试」「续查未知渠道」「显式失效默认被替换」「四种能力丢失选择」。
+- `isAiConfigReady(config, "removed::video-a")` 返回 **true**——渠道已删仍被判为可生成。
+- `resolveModelRequestConfig(config, "gone::veo-3")` 落到第一个渠道，且把 gemini 渠道的模型按 `openai` 协议发出去（协议也被一并替换）。
+
+### 6.2 上游做法
+
+`e74a497`（PR #252）改成：
+
+- `resolveModelForCapability` 对「无法解析能力」的模型保留原值，让 readiness 拦截；只有「能解析出能力但不匹配」时才切换。
+- `isAiConfigReady` 改用 `findChannelModel` 精确匹配，不再兜底到第一个渠道。
+- 新增 `web/tests/model-selection.test.ts`，8 个用例覆盖上述语义。
+- `resolveModelChannel` / `resolveModelRequestConfig` 上游同样没有改：兜底只服务「已通过 readiness 门控」的请求拼装路径。本仓库 13 个请求入口已逐一核对，全部有门控，因此不要在这两个函数里抛错（会把「配置未就绪」变成 service 层异常，文案更差）。
+
+### 6.3 实施方案
+
+本仓库已有 `findChannelModel`（`:163`）与 `modelCapabilityOf`（`:171`），只替换两段逻辑（保留 `ark` 协议分支）：
+
+```ts
+// :180
+export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
+    const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
+    const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
+    for (const model of [currentModel, defaultModel]) {
+        if (!model) continue;
+        const configuredCapability = modelCapabilityOf(config, model);
+        // 保留不可用的选择，让 readiness 阻止请求；只有已知能力不匹配时才切换。
+        if (!configuredCapability || configuredCapability === capability) return model;
+    }
+    return fallbackModel;
+}
+
+// :198
+function isAiConfigReady(config: AiConfig, model: string) {
+    const match = findChannelModel(config, model);
+    return Boolean(match && match.channel.baseUrl.trim() && match.channel.apiKey.trim());
+}
+```
+
+另外三处必须一起改：
+
+**改动 3：导出 `findChannelModel`**（`use-config-store.ts:163`）。`function` 改为 `export function`，供服务层与测试复用，无行为变化。
+
+**改动 4：修掉视频重试的死循环**（`project.tsx:2768`）。`handleRetryNode` 先判断「是否可续查视频任务」，是则直接转入轮询：
+
+```ts
+if (hasResumableVideoTask(rawNode)) return pollVideoNodeTask(rawNode);
+```
+
+而 `pollVideoNodeTask` 用节点保存的 `videoTaskModel` 重建配置并做 readiness 检查（`project.tsx:366-374`）。readiness 变严后，原渠道被删的节点每次点重试都会：命中续查分支 → 用旧渠道模型判 readiness → 失败 → 打开配置弹窗并返回。用户即使重新选了有效模型，节点里的 `videoTaskModel` 仍是旧渠道，**永远无法重新生成**（该死循环今天已存在于「清空 API Key」场景，严格门控只是扩大触发面）。
+
+建议改法：续查前先判断任务配置是否就绪，不就绪则清掉任务身份、走重新生成。
+
+```ts
+if (hasResumableVideoTask(rawNode)) {
+    const taskConfig = buildGenerationConfig(effectiveConfig, { ...rawNode, metadata: { ...rawNode.metadata, model: rawNode.metadata?.videoTaskModel } }, "video");
+    if (isAiConfigReady(taskConfig, taskConfig.model)) return pollVideoNodeTask(rawNode);
+    // 原渠道已不可用：放弃续查，清掉任务身份后走重新生成，避免死循环。
+    setNodes((prev) => prev.map((item) => (item.id === rawNode.id
+        ? { ...item, metadata: { ...item.metadata, videoTaskId: undefined, videoTaskProvider: undefined, videoTaskModel: undefined } }
+        : item)));
+    message.warning(t("workbench.modelUnavailable", { model: rawNode.metadata?.videoTaskModel || "" }));
+}
+```
+
+**改动 5：四处门控补提示**（`project.tsx:2017`、`:2092`、`:2341`、`:2782`）。现在这些分支只调用 `openConfigDialog(true)`，用户看不出原因；改为先 `message.warning` 再开弹窗。工作台（`image/index.tsx`、`video/index.tsx`）与插件宿主已有提示，只按原因分流文案即可。
+
+### 6.4 行为矩阵
+
+| 场景 | 现状 | 改后 |
+| --- | --- | --- |
+| 渠道被删除（未刷新） | 静默发到 `channels[0]` | 保留选择；readiness 为 false；生成入口提示并打开配置弹窗，不发请求 |
+| 模型从渠道移除 | 回落到默认模型（可能在别的渠道） | 同上 |
+| 已知能力不匹配（图片槽位填了视频模型） | 切到默认模型 | 保持（切默认），不回归 |
+| 刷新页面后 | `normalizeModelOptionValue` 清空无效值，readiness 失败 | 同左（不新增迁移） |
+| 视频任务续查 | 可能发到错误渠道 | `pollVideoNodeTask` 用 readiness 守卫，显示「模型不可用」并停止轮询 |
+| 原渠道被删后点视频重试 | 命中续查分支 → 被拦截 → 再次点仍如此（死循环） | 清掉任务身份、提示原因并走重新生成 |
+| 插件 `ai.*` 调用 | 可能静默回退 | `ensureReady` 抛错并打开配置弹窗（现有逻辑） |
+
+### 6.5 文案与 UI（必须与代码同批）
+
+readiness 变严后，存量无效值第一次生成会被拦一次。如果不同时给提示，等于把「静默发错渠道」换成「按钮点了没反应」，所以文案是 P0-3 的一部分：
+
+- 生成入口在打开配置弹窗之前用 `message.warning` 说明原因。新增 i18n：
+  - `workbench.modelUnavailable`：`"模型「{{model}}」所在渠道已不存在，请重新选择"`（英文同义）。
+  - 凭据缺失继续用现有的 `workbench.configFirst`。
+- 四处只开弹窗不提示的门控（`project.tsx:2017`、`:2092`、`:2341`、`:2782`）统一按上面的键分流。
+- 配置弹窗里，四个默认模型 `ModelPicker` 在 `config[group.modelKey]` 解析不到时，在下方渲染一行 `workbench.modelUnavailable` 提示——这是存量失效默认值唯一的可见出口（`app-config-modal.tsx:229` 一带）。
+- `ModelPicker` 本身不改成红框/禁用，继续显示裸模型名（`modelOptionLabel` 现有行为），避免「按钮莫名灰掉」。
+- 「渠道被删」与「模型被删」的区分需要额外比对渠道 id 与同名模型，列为二期（见 Q6）。
+
+### 6.6 兼容与副作用
+
+- 这是运行时容错，不是数据结构变更，不需要迁移。
+- 已有配置里可能残留指向已删渠道的模型 id：升级后表现为「明确阻断」而非「静默换渠道」，属于预期修正。
+- 存量无效值有 5 个来源：删除渠道后节点上的 `model` / `videoTaskModel`、全局默认（`merge` 已自动清空）、Agent 站点工具主动写入（`agent-site-tools.ts:167,218`）、插件传入的 `options.model`、早期版本的裸模型名。
+- 行为变化需要写进 `pending-test`：老画布节点从「静默换模型生成」变成「被拦截要求重选」；打开画布自动续查失败改为节点置红而非发错请求（任务 id 保留）；插件传无效模型改为抛 `canvas.plugins.aiConfigRequired`。
+- `resolveModelChannel` 仍保留 `channels[0]` 兜底（底层请求拼装使用），但生成入口已被 readiness 拦住；后续可另立任务把它改成显式报错。
+
+### 6.7 测试
+
+新增 `web/tests/model-selection.test.ts`，10 条（前 8 条与上游 `:54-100` 等价）：
+
+1. 已删渠道的视频任务：`buildGenerationConfig(config, node("removed::video-a"), "video").model === "removed::video-a"`。
+2. 同上：`ready(selected, selected.model) === false`。
+3. 渠道在、模型被删：`"replacement::deleted-video"` 保留且 `ready === false`。
+4. 未知裸名 `ready(config, "unknown-video") === false`；不存在渠道 `"removed::video-a"` 亦 false。
+5. `resolveModelForCapability({ ...config, videoModel: "removed::video-a" }, undefined, "video") === "removed::video-a"`。
+6. `buildGenerationConfig(config, undefined, "video").model === "replacement::video-b"` 且 `ready === true`。
+7. `resolveModelForCapability(config, "replacement::image-a", "video") === "replacement::video-b"`。
+8. 只换 Key：模型保留、`metadata.videoTaskId` 不变、`ready === true`；Key 清空后 `ready === false`。
+9. 四种能力（image/video/text/audio）下失效值都保留。
+10. 本仓库补充：同名模型存在于两个渠道时 `resolveModelRequestConfig(config, "ch2::gpt-image-2").baseUrl` 必须是 ch2 的地址；`channels: []` 时 `ready(config, "gone::video-a") === false`。
+
+测试写法（已在仓库外验证可行）：
+
+- 只在 `import` 之前 stub `globalThis.localStorage`（Map 版），用 `await import()` 保证顺序，`afterAll` 还原（`i18n/index.ts` 在模块初始化时读 localStorage）。
+- 不 import 任何 `.tsx` / antd / radix / react；`canvas-generation-helpers.ts` 与 `types/canvas.ts` 可在纯 bun 下导入。
+- 运行：`cd web && bun test tests`。
+
+## 七、P0-4 本地存储统计降级
+
+### 7.1 问题
+
+`web/src/services/local-storage-usage.ts:5-8` 直接调用 `navigator.storage.estimate()` 并断言 `usage`、`quota` 存在；`config-local-storage.tsx:42` 又直接用 `usage.quota` 计算百分比。在无 Storage API、权限受限或实现异常的页面（部分内嵌 WebView、非安全上下文）会抛错，配置页「本地存储」整块只剩一条错误提示。
+
+### 7.2 实施方案
+
+`local-storage-usage.ts`：
+
+```ts
+export type LocalStorageUsage = { usage: number; quota: number | null; contentBytes: number; databases: IndexedDbDatabaseUsage[] };
+
+export async function readLocalStorageUsage(): Promise<LocalStorageUsage> {
+    const [estimate, database] = await Promise.all([readStorageEstimate(), readDatabaseUsage("infinite-canvas")]);
+    return { usage: estimate?.usage ?? database.bytes, quota: estimate?.quota ?? null, contentBytes: database.bytes, databases: [database] };
+}
+
+async function readStorageEstimate() {
+    if (typeof navigator === "undefined" || !navigator.storage?.estimate) return null;
+    try {
+        return await navigator.storage.estimate();
+    } catch {
+        return null;
+    }
+}
+```
+
+再加两处加固：
+
+```ts
+// readDatabaseUsage 首行：无 indexedDB 时返回空统计，不抛错
+if (typeof indexedDB === "undefined") return Promise.resolve({ name, version: 0, bytes: 0, stores: [] });
+```
+
+并把两个纯函数搬到 service 层导出，便于单测：
+
+- `formatStorageBytes(bytes: number | null)`：`null` 返回「—」，其余逻辑不变。
+- `storageQuotaPercent(usage)`：`quota` 为空或 0 时返回 `null`，否则 `Math.min(100, usage / quota * 100)`。
+
+`config-local-storage.tsx` 五处调整：
+
+| 行 | 改动 |
+| --- | --- |
+| `:42` | `const percent = usage ? storageQuotaPercent(usage) : null;` |
+| `:67` | hint 按 `usage.quota` 是否为有效正数，切 `quotaHint` / `quotaUnavailable` |
+| `:69-75` | 整条进度条包在 `percent !== null ? (...) : null` 中 |
+| `:74` | `percent={percent ?? 0}` |
+| `:121-126` | 删除本地 `formatStorageBytes`，改为从 service 导入 |
+
+i18n（键名与上游一致）：`config.localStorage.quotaUnavailable: "当前浏览器不提供配额估算"`。
+
+实测失败模式（基线）：`navigator` 没有 `storage` 时直接 `TypeError`；`estimate()` 抛 `SecurityError` 时原样上抛；`estimate()` 返回 `{}` 时 `usage`/`quota` 都是 `undefined` 且无人处理。`navigator.storage` 属 SecureContext API，本项目用局域网 HTTP 访问部署实例时必然命中；而 IndexedDB 明细本身仍然可用，所以降级方案是「保明细、配额显示未知」。
+
+### 7.3 测试与验收
+
+自动化：新增 `web/tests/local-storage-usage.test.ts`，7 条：
+
+1. `navigator` 无 `storage` → 不抛，`quota === null`，`usage` 回退为 IndexedDB 字节数。
+2. `estimate()` 抛 `SecurityError` → 同上。
+3. `estimate()` 返回 `{ usage: 123, quota: 456 }` → 原样透出。
+4. `estimate()` 返回 `{}` → `usage` 回退、`quota === null`。
+5. `indexedDB` 缺失 → 不抛。
+6. `formatStorageBytes(null) === "—"`、`1536 → "1.5 KB"`、`0 → "0 B"`。
+7. `storageQuotaPercent`：`{usage:50,quota:100} → 50`；`quota:null → null`；`quota:0 → null`（防 `NaN` / `Infinity`）。
+
+做法：stub `globalThis.navigator` 与 `globalThis.indexedDB`，`afterAll` 还原。
+
+手测：
+
+1. 正常 Chrome：显示 IndexedDB 占用、站点占用、配额与进度条，下方按仓库明细完整。
+2. Console 执行 `Object.defineProperty(Navigator.prototype, "storage", { configurable: true, get: () => undefined });` 后点「刷新统计」：仍显示占用与明细，配额显示「当前浏览器不提供配额估算」，无进度条、无红色错误。
+3. 刷新页面恢复：三块指标与进度条正常。
+
+## 八、工程配套
+
+### 8.1 测试入口
+
+`web/package.json` 目前没有 `test` 脚本。仓库已有 5 个测试（4 个 `bun:test`、1 个 `node:assert/strict`），使用相对路径导入，bun 1.2.21 可直接发现并执行；调研时冒烟（`bun test tests`）5 个文件 22 个用例全部通过。计划新增：
+
+```json
+"test": "bun test tests"
+```
+
+不接入 CI，不改变构建流程。
+
+### 8.2 测试环境注意事项
+
+- bun 没有 `window` / `localStorage` / `indexedDB`；依赖 localStorage 的模块必须在 `import` 前打桩，再用动态 `import()`（参考上游用例的写法）。
+- `@/` 别名依赖 `web/tsconfig.json` 的 `paths`，bun 会自动读取；测试文件本身建议用相对路径，避免额外配置。
+- `web/tsconfig.json` 的 `include` 不含 `tests/`，测试文件不受 `tsc --noEmit` 保护；是否把 `tests/**` 加进 include 属独立小改动，建议一并评估（加了会让类型检查覆盖测试，但可能出现既有用例的类型错误）。
+
+### 8.3 新增测试文件
+
+- `web/tests/model-selection.test.ts`（P0-3，移植上游 8 例）。
+- `web/tests/local-storage-usage.test.ts`（P0-4，2~3 例，测格式化与百分比边界）。
+
+## 九、任务拆分与顺序
+
+| ID | 任务 | 写作用域 | 依赖 | 预估 |
+| --- | --- | --- | --- | --- |
+| T1 | P0-2 画布尺寸测量 | `web/src/pages/canvas/project.tsx` | 无 | 0.5h |
+| T2 | P0-3 模型回退 + 视频重试出口 + 测试 | `web/src/stores/use-config-store.ts`、`web/src/pages/canvas/project.tsx`、`web/tests/model-selection.test.ts` | T1（同一文件，避免冲突） | 2h |
+| T3 | P0-4 存储降级 + 测试 | `web/src/services/local-storage-usage.ts`、`web/src/components/layout/config-local-storage.tsx`、`web/tests/local-storage-usage.test.ts` | 无 | 1h |
+| T4 | P0-1 请求超时 | `web/src/services/api/image.ts` | 无 | 0.5h |
+| T5 | 文案与测试入口 | 两个 locale、`web/package.json` | T1-T4 | 0.5h |
+| T6 | 文档 | `pending-test.zh-CN.mdx`、`CHANGELOG.md` | T1-T5 | 0.5h |
+
+顺序：T1 → T2 → T3 → T4 → T5 → T6。
+
+- T1 最小、见效最快，可当天验证。
+- T2 涉及行为变化，需要测试。
+- T5 统一改 i18n，避免多个任务同时改同一文件（两个 locale 的 `apiErrors` 是单行超长对象，自动 cherry-pick 必冲突，只能手工插键）。
+- T6 在全部验证完成后写。
+
+预计总工时 0.5~1 人日。
+
+## 十、验收与回归
+
+### 10.1 自动化
+
+- `cd web && bun test`：既有 5 个用例与新增用例全部通过。
+- `cd web && bun run typecheck`：无新增错误。
+
+### 10.2 手测汇总
+
+- P0-1：慢接口超时文案与重试；取消仍是取消；五条正常路径不受影响。
+- P0-2：第 5.9 节的 10 条清单。
+- P0-3：删渠道后生成/重试/任务恢复都不发请求；重选后恢复；仅换 Key 保留模型与任务。
+- P0-4：正常环境与无 Storage API 环境各一遍。
+
+### 10.3 回归复测（来自 pending-test）
+
+| 关联项 | 为什么必须复测 |
+| --- | --- |
+| v0.18.3 生成配置连线参考输入 | P0-3 改 `buildGenerationConfig` 与模型解析，生成配置的模型选择与参考图请求都走这条链 |
+| 视频任务只查原任务、保存原渠道模型 | P0-3 改 readiness 语义并新增「放弃续查」出口，任务恢复、重试与「获取任务状态」都直接相关 |
+| 图片保存：失败/取消/超时不得当成功 | P0-1 引入新的超时错误路径，必须确认不会把半成品当成功图片落库 |
+| v0.18.2 主分图交互（设为主图、收放、联动） | P0-2 改视口与尺寸测量，主图定位、双击展开、小地图都依赖 `size`/`viewport` |
+| 画布选择与平移、框选虚线 | 框选与平移依赖实测 `size` |
+| 本地存储设置（Tab、统计、刷新） | P0-4 直接改该面板类型与降级分支 |
+| 画布生成配置（四模式切换、重试） | P0-3 影响各模式的模型解析 |
+
+### 10.4 文档草稿（全部验证通过后写入）
+
+`docs/content/docs/progress/pending-test.zh-CN.mdx` 新增一节：
+
+```md
+## v0.18.4（上游 P0 修复）
+
+- 图片请求超时：生图、图片编辑和多图参考编辑请求超过 10 分钟未返回时，节点应从生成中转为错误并提示「生图请求超时」，不再无限停留；用户主动停止仍提示「请求已取消」；正常耗时的生成（含 4K、多参考图）不受影响。自定义调用脚本内的请求不在本次超时范围。
+- 画布尺寸与视口：硬刷新或从首页进入画布后，测量应使用容器实际尺寸，点「重置视图」内容以视口中心居中，框选与平移跟手，小地图与可见区域裁剪正确；刷新后视口应保持上次保存的位置，不被首屏强制居中覆盖；新建空项目的初始视口仍应可见可用。
+- 失效模型选择：节点已选模型后，移除所属渠道或该模型并保留另一个默认模型，生成、重试和未完成视频任务恢复都必须保留失效模型并提示原因，不得向默认模型或其它渠道发送请求；原渠道被删的视频节点点重试时应清掉任务身份并允许重新生成，而不是反复弹配置窗；重新选择有效模型后才能生成；同渠道仅更换 API Key 应保留原模型与原任务。
+- 本地存储统计降级：在没有 `navigator.storage.estimate`（或调用抛错）的环境打开「本地存储」，仍应显示 IndexedDB 占用与按对象仓库的明细，配额一栏显示「—」并提示浏览器未提供，不显示使用率进度条、不弹整块错误；正常环境下三块指标与进度条行为不变。
+```
+
+`CHANGELOG.md` 的 `## Unreleased` 增加四条版本级归纳：
+
+```md
++ [修复] 生图、图片编辑和 Gemini 生图请求增加 10 分钟超时，接口长时间不返回时节点显示超时错误而不是一直停在生成中。
++ [修复] 画布在项目加载完成后再测量容器尺寸，修复刷新或直达画布后「重置视图」不居中、框选与小地图错位的问题，并避免首屏测量覆盖已保存的视口。
++ [修复] 已选模型或所属渠道被移除时保留原选择并阻止生成与视频任务查询，避免静默切换到默认模型或其他渠道；原渠道失效的视频节点可放弃续查并重新生成。
++ [修复] 本地存储统计在不支持 Storage API 的环境下改为降级读取 IndexedDB，配额显示为不可用，不再因估算接口缺失整块报错。
+```
+
+## 十一、明确不做
+
+以下项来自上游，但不在本次 P0：
+
+- WebP 缩略图管线（P1，收益最大，需要接入放置节点与素材解析）。
+- 居中聚焦、选中自动居中、原地重生成偏好。
+- 复制/粘贴带参考连线。
+- 图片质量五档、尺寸与质量解耦、脚本 `resolution` 参数、Gemini `imageSize`。
+- 流式请求超时、视频创建/轮询超时、模型列表超时、脚本通道超时（P1-1 ~ P1-4）。
+- ZCode 插件支持、pnpm workspace、移除 Ark / Seedance。
+- 整版合并上游或把版本号追到 v0.20。
+
+## 十二、待确认
+
+| 编号 | 问题 | 建议 |
+| --- | --- | --- |
+| Q1 | 超时是否同时覆盖流式、视频、模型列表、脚本通道 | 本轮只做图片；其余按 P1-1 ~ P1-4 顺序推进，避免一次引入四种错误路径 |
+| Q2 | 新项目首次进入是否自动居中 | 不做，保持现有保存视口语义；需要则单独立项 |
+| Q3 | 是否接受给 `web/package.json` 增加 `test` 脚本，并把 `tests/**` 加入 tsconfig include | 建议加 test 脚本；include 单独评估 |
+| Q4 | 模型不可用时增加「渠道/模型已删除」的提示 | **必须**与 P0-3 同批；否则只是把静默换渠道变成点了没反应 |
+| Q5 | P0-2 是否同时加入取整与等值守卫 | 建议加，单独提交，避免面板动画期间频繁重渲染 |
+| Q6 | 是否区分「渠道被删」与「模型被删」 | 二期；需要额外比对渠道 id 与同名模型 |
+| Q7 | `resolveModelForCapability` 的内置兜底（`default::gpt-image-2`）是否保留 | 保留（与上游一致），该值最终会被 readiness 拦住 |
+| Q8 | 视频「放弃续查」时是否清掉 `videoTaskId` | 建议清掉，给用户重新生成的出口；如担心丢任务，可保留字段只置 error（但会继续死循环） |
+
+## 附录 A：上游提交对照
+
+| 上游提交 | 内容 | 本计划 |
+| --- | --- | --- |
+| `f84f3ff` | image request timeout | P0-1（多补 Ark 分支与文案映射） |
+| `99bb4b3` | observe canvas size once loaded | P0-2（完全一致，另可选加固） |
+| `e74a497`（PR #252） | prevent silent model fallback | P0-3（保留 ark 分支，移植测试） |
+| `fb061e8`（PR #284） | handle missing storage estimate API | P0-4（增加 UI 降级） |
+
+## 附录 B：改前基线（用于确认问题真实存在）
+
+- P0-2：在 1440×900 窗口打开任意项目，点「重置视图」——内容明显偏左上；侧栏点节点聚焦同样偏；拖动窗口大小后偏移不变（说明尺寸从未更新）。
+- P0-3：配置里建两个渠道，选中渠道 A 的模型生成一次；删除渠道 A；再次生成——DevTools Network 会看到请求打到渠道 B（默认渠道），界面无提示。代码层实测：`isAiConfigReady(config, "removed::video-a")` 为 `true`；`resolveModelRequestConfig(config, "gone::veo-3")` 返回第一个渠道的地址与 `openai` 协议；把上游 8 条用例跑在本仓库源码上是 3 通过 / 5 失败。
+- P0-1：把渠道 Base URL 指向不接受连接的地址或用延迟服务，生成后请求长时间 pending，节点一直「生成中」。
+- P0-4：在不提供 `navigator.storage.estimate` 的环境打开配置页「本地存储」，整块显示「读取本地存储失败」，没有占用明细（代码层实测：无 `navigator.storage` 直接抛 `TypeError`）。

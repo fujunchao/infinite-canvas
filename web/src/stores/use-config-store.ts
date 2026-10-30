@@ -160,7 +160,7 @@ export function guessCapability(name: string): ModelCapability {
     return "text";
 }
 
-function findChannelModel(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
+export function findChannelModel(config: AiConfig, value: string): { channel: ModelChannel; model: ChannelModel } | null {
     const decoded = decodeChannelModel(value);
     const name = decoded?.model || value;
     const channel = decoded ? config.channels.find((item) => item.id === decoded.channelId) : config.channels.find((item) => item.models.some((model) => model.name === name));
@@ -180,8 +180,12 @@ export function modelMatchesCapability(config: AiConfig, value: string, capabili
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
     const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
-    if (currentModel && modelMatchesCapability(config, currentModel, capability)) return currentModel;
-    if (defaultModel && modelMatchesCapability(config, defaultModel, capability)) return defaultModel;
+    for (const model of [currentModel, defaultModel]) {
+        if (!model) continue;
+        const configuredCapability = modelCapabilityOf(config, model);
+        // 解析不到的模型保留原值，交给 readiness 拦截；只有已知能力不匹配时才切换。
+        if (!configuredCapability || configuredCapability === capability) return model;
+    }
     return fallbackModel;
 }
 
@@ -196,8 +200,9 @@ export function resolveModelScript(config: AiConfig, value: string) {
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+    // 必须精确匹配渠道，不能借 resolveModelChannel 的 channels[0] 兜底，否则已删渠道仍会被判为可生成。
+    const match = findChannelModel(config, model);
+    return Boolean(model.trim() && match && match.channel.baseUrl.trim() && match.channel.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(

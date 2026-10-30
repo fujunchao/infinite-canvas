@@ -1,0 +1,127 @@
+---
+title: Upstream P0 Adoption Plan
+description: Plan for selectively adopting four upstream v0.19/v0.20 fixes without merging the divergent canvas implementation
+---
+
+# Upstream P0 Adoption Plan
+
+> Status: **implemented in v0.18.4**. This document keeps the pre-implementation analysis and the acceptance criteria; see the changelog and the v0.18.4 commit for the actual changes. Line numbers refer to the `v0.18.3` checkout.
+
+## Why selective adoption
+
+Upstream shipped v0.19.0 (2026-09-16, 13 commits) and v0.20.0 (2026-10-10, 40 commits) after the fork's baseline. A full merge is not viable: the fork keeps real placement nodes for multi-image batches while upstream keeps a single node with candidate cards (`project.tsx` differs by about 1500 lines), and upstream removed the Ark / Seedance support this fork intentionally keeps.
+
+Four changes are independent of that architectural split and address defects that exist here.
+
+## Scope
+
+| ID | Change | Upstream | Why | Size |
+| --- | --- | --- | --- | --- |
+| P0-1 | Image request timeout | `f84f3ff` | Requests hang forever and nodes stay "generating" | ~10 lines |
+| P0-2 | Canvas size measurement fix | `99bb4b3` | Focus, reset view, center zoom and minimap are offset because `size` stays 1200x720 | 4 lines |
+| P0-3 | Prevent silent model fallback | `e74a497` (PR #252) | Deleted channel silently redirects generation; also fixes a video retry deadlock | ~20 lines + tests |
+| P0-4 | Storage estimate fallback | `fb061e8` (PR #284) | Local-storage panel fails entirely without the Storage API | ~30 lines |
+
+## P0-1 Image request timeout
+
+Add `IMAGE_REQUEST_TIMEOUT_MS = 10 * 60_000` to `web/src/services/api/image.ts` and apply `timeout` to four axios calls:
+
+- Gemini `generateContent` (`image.ts:690`).
+- `/images/generations` (`image.ts:758-761`).
+- The fork-only Ark reference-image branch (`image.ts:824-827`), which upstream does not have.
+- `/images/edits` (`image.ts:862`).
+
+Map `ECONNABORTED` / `ETIMEDOUT` in `readAxiosError` **after** the `axios.isCancel` branch, so a user cancel still reports "request canceled". Use a new `apiErrors.imageTimeout` message, matching the upstream key name.
+
+Out of scope for P0-1: streaming requests (a total-time budget would truncate long streams), video creation/polling (needs a shorter, separate timeout), model listing, and the custom-script channel.
+
+## P0-2 Canvas size measurement
+
+The measuring effect in `project.tsx:607-624` uses an empty dependency list. It runs while `projectLoaded` is false, the canvas container is not rendered, `containerRef.current` is null and the effect returns early; it never runs again. `size` therefore stays at `{ width: 1200, height: 720 }` for the whole session.
+
+Change only `web/src/pages/canvas/project.tsx`:
+
+1. Delete `didInitialCenterRef` (`:212`).
+2. Add `if (!projectLoaded) return;` at the top of the effect.
+3. Delete the first-measure centering branch (`:614-617`).
+4. Change the dependency array to `[projectLoaded]`.
+
+Adding the dependency and deleting the centering **must ship together**: keeping the centering would overwrite the restored viewport and the 500 ms viewport-save effect would persist it, resetting every project's pan and zoom on open.
+
+Initial centering is intentionally not added: it never executed in the current build, and new projects already open with `{0,0,1}`. An optional, separately committed hardening rounds the measured size and skips equal values to avoid re-rendering during the 500 ms panel animation.
+
+## P0-3 Silent model fallback
+
+Two functions in `use-config-store.ts` cause the problem:
+
+- `resolveModelForCapability` (`:180`) treats "cannot resolve" as "capability mismatch" and swaps in the default model.
+- `isAiConfigReady` (`:198`) resolves through `resolveModelChannel`, which falls back to `channels[0]`.
+
+Adopt upstream semantics while keeping the Ark format:
+
+- Keep an unresolvable selection unchanged; only switch when the model resolves to a different known capability.
+- Resolve readiness with `findChannelModel` (export it first) instead of `resolveModelChannel`.
+
+One additional change is required in this fork: `project.tsx:2768` routes every retry of a resumable video node straight to polling, and polling rebuilds the config from the old `videoTaskModel`. Once readiness becomes strict, a node whose original channel was deleted can never regenerate (dialog opens, retry loops). Before polling, check readiness of the task config; when it fails, clear `videoTaskId` / `videoTaskProvider` / `videoTaskModel`, warn the user and continue with a fresh generation.
+
+Four gates that currently only open the configuration dialog (`project.tsx:2017`, `:2092`, `:2341`, `:2782`) must also show a warning explaining that the model's channel no longer exists. The configuration dialog should surface the same hint for stale default models.
+
+Measured baseline on this checkout: upstream's 8 model-selection assertions give 3 pass / 5 fail here; `isAiConfigReady(config, "removed::video-a")` returns `true`; `resolveModelRequestConfig(config, "gone::veo-3")` falls back to the first channel and even switches the protocol to `openai`.
+
+`resolveModelChannel` and `resolveModelRequestConfig` stay unchanged (upstream does the same); all 13 request entry points were audited and are gated by readiness.
+
+## P0-4 Storage estimate fallback
+
+- `LocalStorageUsage.quota` becomes `number | null`.
+- Add `readStorageEstimate()` that returns `null` when `navigator.storage?.estimate` is missing or throws, and fall back to the IndexedDB byte total for `usage`.
+- Guard `readDatabaseUsage` when `indexedDB` is unavailable.
+- Move `formatStorageBytes` (accepting `null` -> "—") and `storageQuotaPercent` into the service for testability.
+- In `config-local-storage.tsx`: compute the percentage only with a valid quota, show "Quota estimation is unavailable in this browser" when null, skip the progress bar, and use the service's formatter.
+
+This matters in practice: `navigator.storage` is a SecureContext API, so a LAN HTTP deployment always hits the failure while the IndexedDB breakdown is still available.
+
+## Engineering support
+
+- Add `"test": "bun test tests"` to `web/package.json`. The existing five test files (22 cases) run with bun 1.2.21.
+- Tests must stub `localStorage` before dynamically importing the store (i18n reads it during module init), and must not import any `.tsx` / antd modules.
+- `tests/**` is outside the `tsconfig` include list, so tests are not type-checked today; deciding whether to add them is a separate small change.
+
+## Task order
+
+1. P0-2 (smallest, immediately verifiable).
+2. P0-3 (behavior change; same file as P0-2, so run after it).
+3. P0-4 (type and UI change).
+4. P0-1 (isolated request change).
+5. Localization keys and the test script.
+6. Documentation: pending-test and changelog.
+
+Each task is independently revertible. Estimated effort: half a working day to one day.
+
+## Acceptance
+
+- `cd web && bun test tests` and `bun run typecheck` pass.
+- Reset view, element-list focus, zoom slider, minimap, window resize and panel toggles all center correctly; the saved viewport is not overwritten on open.
+- A slow channel exceeding the timeout shows the timeout message and allows retry; cancel still reports "request canceled".
+- Deleting the active channel blocks generation and retry with a clear message, never routes to another channel, and video nodes get a fresh-generation path instead of looping.
+- The local-storage panel works with and without the Storage API; quota shows "—" and the IndexedDB breakdown remains.
+
+## Documentation
+
+When the fixes land, add four bullets to `pending-test.zh-CN.mdx` (timeout, measurement/viewport, unavailable model selection including the video retry path, storage fallback) and four version-level lines to the `Unreleased` section of `CHANGELOG.md`, following the repository's documentation rules.
+
+## Out of scope
+
+WebP thumbnails, centered focus, copy reference connections, image quality tiers and resolution decoupling, streaming/video/model-list timeouts, ZCode plugins, pnpm workspace, removing Ark / Seedance, and any full merge of upstream.
+
+## Open questions
+
+| ID | Question | Recommendation |
+| --- | --- | --- |
+| Q1 | Extend timeouts to streaming, video, model lists and scripts | Not in this round; follow-ups in that order |
+| Q2 | Center the viewport for a newly created empty project | No; keep the saved-viewport semantics |
+| Q3 | Add the test script and include `tests/**` in typecheck | Add the script; evaluate the include separately |
+| Q4 | Warn users when a model's channel no longer exists | **Required** together with P0-3 |
+| Q5 | Add the rounding/equality guard for P0-2 | Yes, as a separate commit |
+| Q6 | Distinguish "channel deleted" from "model deleted" | Later; needs extra lookups |
+| Q7 | Keep the built-in `default::gpt-image-2` fallback | Keep, matching upstream; readiness blocks it |
+| Q8 | Clear `videoTaskId` when abandoning a stalled task | Yes; otherwise the retry loop persists |

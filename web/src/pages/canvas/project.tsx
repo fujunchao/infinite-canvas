@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoTaskFailed, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
-import { defaultConfig, useConfigStore, useEffectiveConfig, withLocalProxy } from "@/stores/use-config-store";
+import { defaultConfig, findChannelModel, modelOptionName, useConfigStore, useEffectiveConfig, withLocalProxy } from "@/stores/use-config-store";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
@@ -209,7 +209,6 @@ function InfiniteCanvasPage() {
     const viewportSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const applyingHistoryRef = useRef(false);
     const historyPausedRef = useRef(false);
-    const didInitialCenterRef = useRef(false);
     const rafRef = useRef<number | null>(null);
     const nodeDraggingRef = useRef(false);
     const dragRef = useRef<{
@@ -365,10 +364,12 @@ function InfiniteCanvasPage() {
             try {
                 const generationConfig = buildGenerationConfig(effectiveConfig, { ...node, metadata: { ...node.metadata, model: node.metadata?.videoTaskModel } }, "video");
                 if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                    const reason = findChannelModel(generationConfig, generationConfig.model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(generationConfig.model) });
                     if (silent) {
-                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: t("workbench.configFirst") } } : item)));
+                        setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: reason } } : item)));
                         return;
                     }
+                    message.warning(reason);
                     openConfigDialog(true);
                     return;
                 }
@@ -605,23 +606,21 @@ function InfiniteCanvasPage() {
     }, [selectionBox]);
 
     useEffect(() => {
+        // 画布容器只在项目加载完成后渲染，必须等 projectLoaded，否则首次拿不到容器且不会重跑。
+        if (!projectLoaded) return;
         const el = containerRef.current;
         if (!el) return;
 
         const updateSize = () => {
             const rect = el.getBoundingClientRect();
             setSize({ width: rect.width, height: rect.height });
-            if (!didInitialCenterRef.current) {
-                didInitialCenterRef.current = true;
-                setViewport({ x: rect.width / 2, y: rect.height / 2, k: 1 });
-            }
         };
 
         updateSize();
         const resizeObserver = new ResizeObserver(updateSize);
         resizeObserver.observe(el);
         return () => resizeObserver.disconnect();
-    }, []);
+    }, [projectLoaded]);
 
     const screenToCanvas = useCallback((clientX: number, clientY: number) => {
         const rect = containerRef.current?.getBoundingClientRect();
@@ -2014,6 +2013,7 @@ function InfiniteCanvasPage() {
             if (!node.metadata?.content) return;
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: node.metadata?.size || "auto" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                message.warning(findChannelModel(generationConfig, generationConfig.model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(generationConfig.model) }));
                 openConfigDialog(true);
                 return;
             }
@@ -2089,6 +2089,7 @@ function InfiniteCanvasPage() {
             if (!node.metadata?.content) return;
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                message.warning(findChannelModel(generationConfig, generationConfig.model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(generationConfig.model) }));
                 openConfigDialog(true);
                 return;
             }
@@ -2137,7 +2138,7 @@ function InfiniteCanvasPage() {
                 setRunningNodeId(null);
             }
         },
-        [effectiveConfig, finishGenerationRequest, openConfigDialog, startGenerationRequest, t],
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
     );
 
     const handleFontSizeChange = useCallback((nodeId: string, fontSize: number) => {
@@ -2338,6 +2339,7 @@ function InfiniteCanvasPage() {
             const sourceNode = rawSourceNode ? resolveImagePlacementNode(rawSourceNode, currentNodeById) : undefined;
             const generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                message.warning(findChannelModel(generationConfig, generationConfig.model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(generationConfig.model) }));
                 openConfigDialog(true);
                 return;
             }
@@ -2764,11 +2766,27 @@ function InfiniteCanvasPage() {
         async (node: CanvasNodeData, imageId?: string) => {
             const currentNodes = nodesRef.current;
             const currentNodeById = new Map(currentNodes.map((item) => [item.id, item]));
-            const rawNode = currentNodeById.get(node.id) || node;
-            if (hasResumableVideoTask(rawNode)) return pollVideoNodeTask(rawNode);
+            let rawNode = currentNodeById.get(node.id) || node;
+            if (hasResumableVideoTask(rawNode)) {
+                const taskConfig = buildGenerationConfig(effectiveConfig, { ...rawNode, metadata: { ...rawNode.metadata, model: rawNode.metadata?.videoTaskModel } }, "video");
+                if (isAiConfigReady(taskConfig, taskConfig.model)) return pollVideoNodeTask(rawNode);
+                const taskModel = rawNode.metadata?.videoTaskModel || "";
+                if (findChannelModel(taskConfig, taskConfig.model)) {
+                    // 渠道仍在，只是缺少凭据：保留任务身份，修好配置后仍可继续查询。
+                    message.warning(t("workbench.configFirst"));
+                    openConfigDialog(true);
+                    return;
+                }
+                // 原渠道或模型已不存在：放弃续查并清掉任务身份；节点模型本身也失效时一并清掉，回退到全局默认模型重新生成。
+                const nodeModel = rawNode.metadata?.model;
+                const clearModel = !nodeModel || !findChannelModel(effectiveConfig, nodeModel);
+                rawNode = { ...rawNode, metadata: { ...rawNode.metadata, videoTaskId: undefined, videoTaskProvider: undefined, videoTaskModel: undefined, ...(clearModel ? { model: undefined } : {}) } };
+                setNodes((prev) => prev.map((item) => (item.id === rawNode.id ? { ...item, metadata: { ...item.metadata, videoTaskId: undefined, videoTaskProvider: undefined, videoTaskModel: undefined, ...(clearModel ? { model: undefined } : {}) } } : item)));
+                message.warning(t("workbench.modelUnavailable", { model: modelOptionName(taskModel) }));
+            }
             const placementResource = getImagePlacementResource(rawNode, currentNodeById);
             const batchRoot = placementResource?.batchNode || (rawNode.type === CanvasNodeType.Image && rawNode.metadata?.images?.length ? rawNode : null);
-            const displayNode = placementResource ? resolveImagePlacementNode(rawNode, currentNodeById) : node;
+            const displayNode = placementResource ? resolveImagePlacementNode(rawNode, currentNodeById) : rawNode;
             const targetImageId = imageId || placementResource?.image.id || batchRoot?.metadata?.primaryImageId || batchRoot?.metadata?.images?.[0]?.id;
             const sourceBase = placementResource ? displayNode : batchRoot || displayNode;
             const sourceNode = findRetrySourceNode(sourceBase.id, currentNodes, connectionsRef.current) || (batchRoot ? findRetrySourceNode(batchRoot.id, currentNodes, connectionsRef.current) : null) || sourceBase;
@@ -2779,6 +2797,7 @@ function InfiniteCanvasPage() {
                     ? { ...effectiveConfig, model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model, quality: savedImageMetadata.quality || effectiveConfig.quality, size: savedImageMetadata.size || effectiveConfig.size, background: savedImageMetadata.background ?? effectiveConfig.background, count: "1" }
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, displayNode.type === CanvasNodeType.Text ? "text" : displayNode.type === CanvasNodeType.Video ? "video" : displayNode.type === CanvasNodeType.Audio ? "audio" : "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                message.warning(findChannelModel(generationConfig, generationConfig.model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(generationConfig.model) }));
                 openConfigDialog(true);
                 return;
             }

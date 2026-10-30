@@ -5,6 +5,13 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## v0.18.4 — upstream P0 fixes
+
+- Image request timeout: generation, image editing and multi-reference edits must fail with "The image request timed out" after 10 minutes without a response instead of staying in the generating state; user cancellation must still report "Request canceled"; normal slow generations (including 4K and multiple references) keep working. Requests inside custom model scripts are out of scope.
+- Canvas size and viewport: after a hard refresh or entering the canvas from the home page, the canvas must measure the real container size, reset view must center the content, marquee selection and panning must stay in sync, and the minimap and viewport culling must be correct. Reopening must restore the saved viewport instead of overwriting it with a first-measure centering. A newly created empty project must still open with a usable viewport.
+- Unavailable model selection: after removing the selected model or its channel while keeping another default, generation, retry and video task recovery must keep the unavailable selection, warn that the model's channel no longer exists, and never send the request to the default model or another channel. Retrying a video node whose original channel was deleted must clear the task identity and allow a fresh generation instead of repeatedly opening the configuration dialog. Selecting a valid model restores generation; rotating only the API key keeps the saved model and task.
+- Local storage fallback: without `navigator.storage.estimate` (or when it throws), the local-storage panel must still show IndexedDB usage and per-store details, show "—" and "Quota estimation is unavailable in this browser" for the quota, hide the usage progress bar, and avoid a full-panel error. Normal environments keep the three metrics and the progress bar.
+
 ## v0.18.3 — config node reference inputs
 
 - A config node driven by connections alone (no `@` references in the composer) must include connected upstream images, videos, audio and text in the request: image mode should use the image-to-image path (`/images/edits` or the channel's image payload), and the generated image node must store `metadata.generationType: "edit"` with non-empty `references`; video mode must carry connected reference images, videos and audio as well.

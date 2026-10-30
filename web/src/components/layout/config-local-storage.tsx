@@ -4,7 +4,7 @@ import { Database, HardDrive, Layers3, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import { readLocalStorageUsage, type LocalStorageUsage } from "@/services/local-storage-usage";
+import { formatStorageBytes, readLocalStorageUsage, storageQuotaPercent, type LocalStorageUsage } from "@/services/local-storage-usage";
 
 const storeLabelKeys: Record<string, string> = {
     app_state: "appState",
@@ -39,7 +39,7 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
     }, [active, refresh, usage]);
 
     const indexedDbBytes = usage?.contentBytes ?? 0;
-    const percent = usage ? Math.min(100, (usage.usage / usage.quota) * 100) : 0;
+    const percent = usage ? storageQuotaPercent(usage) : null;
 
     return (
         <div className="space-y-3">
@@ -64,15 +64,22 @@ export function ConfigLocalStorage({ active }: { active: boolean }) {
                         <div className="mt-4 grid gap-3 sm:grid-cols-3">
                             <StorageMetric icon={<Database className="size-4" />} label={t("config.localStorage.indexedDbUsage")} value={formatStorageBytes(indexedDbBytes)} hint={t("config.localStorage.contentEstimate")} />
                             <StorageMetric icon={<HardDrive className="size-4" />} label={t("config.localStorage.siteUsage")} value={formatStorageBytes(usage.usage)} hint={t("config.localStorage.siteUsageHint")} />
-                            <StorageMetric icon={<Layers3 className="size-4" />} label={t("config.localStorage.quota")} value={formatStorageBytes(usage.quota)} hint={t("config.localStorage.quotaHint")} />
+                            <StorageMetric
+                                icon={<Layers3 className="size-4" />}
+                                label={t("config.localStorage.quota")}
+                                value={formatStorageBytes(usage.quota)}
+                                hint={usage.quota ? t("config.localStorage.quotaHint") : t("config.localStorage.quotaUnavailable")}
+                            />
                         </div>
-                        <div className="mt-4">
-                            <div className="mb-1 flex justify-between text-xs text-stone-500">
-                                <span>{t("config.localStorage.quotaProgress")}</span>
-                                <span className="tabular-nums">{percent.toFixed(2)}%</span>
+                        {percent !== null ? (
+                            <div className="mt-4">
+                                <div className="mb-1 flex justify-between text-xs text-stone-500">
+                                    <span>{t("config.localStorage.quotaProgress")}</span>
+                                    <span className="tabular-nums">{percent.toFixed(2)}%</span>
+                                </div>
+                                <Progress percent={percent} showInfo={false} />
                             </div>
-                            <Progress percent={percent} showInfo={false} />
-                        </div>
+                        ) : null}
                     </>
                 ) : null}
             </section>
@@ -118,9 +125,3 @@ function storeLabel(name: string, t: TFunction) {
     return key ? t(`config.localStorage.stores.${key}`) : name;
 }
 
-function formatStorageBytes(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-}

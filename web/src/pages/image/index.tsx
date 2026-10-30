@@ -11,7 +11,7 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { findChannelModel, modelOptionLabel, modelOptionName, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
@@ -157,7 +157,7 @@ export default function ImagePage() {
             return;
         }
         if (!isAiConfigReady(effectiveConfig, model)) {
-            message.warning(t("workbench.configFirst"));
+            message.warning(findChannelModel(effectiveConfig, model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(model) }));
             openConfigDialog(true);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("imageWorkbench.configIncomplete") });
             return;
@@ -311,7 +311,7 @@ export default function ImagePage() {
             return null;
         }
         if (!isAiConfigReady(effectiveConfig, model)) {
-            message.warning(t("workbench.configFirst"));
+            message.warning(findChannelModel(effectiveConfig, model) ? t("workbench.configFirst") : t("workbench.modelUnavailable", { model: modelOptionName(model) }));
             openConfigDialog(true);
             return null;
         }
