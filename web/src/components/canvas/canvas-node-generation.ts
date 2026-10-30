@@ -7,6 +7,8 @@ import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/ty
 import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 
+const CONFIG_REFERENCE_TOKEN = /@\[node:[^\]]+\]/;
+
 export type NodeGenerationContext = {
     prompt: string;
     referenceImages: ReferenceImage[];
@@ -40,7 +42,8 @@ export type NodeGenerationInput = NodeGenerationResourceInput | NodeGenerationGr
 export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], prompt: string): NodeGenerationContext {
     const inputs = buildNodeGenerationInputs(nodeId, nodes, connections);
     const sourceNode = nodes.find((node) => node.id === nodeId);
-    if (sourceNode?.type === CanvasNodeType.Config && Boolean(sourceNode.metadata?.composerContent?.trim())) {
+    // 提示词里没有 @ 引用时仍按连线读取全部上游资源，避免组装提示词只写文字时丢掉已连接的参考图。
+    if (sourceNode?.type === CanvasNodeType.Config && CONFIG_REFERENCE_TOKEN.test(prompt)) {
         return buildComposerGenerationContext(inputs, prompt);
     }
 
@@ -69,13 +72,11 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
     const labelByNodeId = new Map<string, string>();
     const textBlocks: string[] = [];
     const counts = { image: 0, video: 0, audio: 0, text: 0 };
-    let hasToken = false;
     let lastIndex = 0;
     let nextPrompt = "";
 
     for (const match of prompt.matchAll(/@\[node:([^\]]+)\]/g)) {
         if (match.index === undefined) continue;
-        hasToken = true;
         nextPrompt += prompt.slice(lastIndex, match.index);
         const input = inputByNodeId.get(match[1]);
         if (input) {
@@ -99,19 +100,6 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
     const referenceImages = selectedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
     const referenceVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
-
-    if (!hasToken) {
-        return {
-            prompt,
-            referenceImages: [],
-            referenceVideos: [],
-            referenceAudios: [],
-            textCount: 0,
-            imageCount: 0,
-            videoCount: 0,
-            audioCount: 0,
-        };
-    }
 
     return {
         prompt: nextPrompt,

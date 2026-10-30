@@ -5,6 +5,12 @@ description: Implemented changes that still need manual verification
 
 # Pending Tests
 
+## v0.18.3 — config node reference inputs
+
+- A config node driven by connections alone (no `@` references in the composer) must include connected upstream images, videos, audio and text in the request: image mode should use the image-to-image path (`/images/edits` or the channel's image payload), and the generated image node must store `metadata.generationType: "edit"` with non-empty `references`; video mode must carry connected reference images, videos and audio as well.
+- Reference filtering still applies: when the composer contains `@` references, only the referenced resources are sent and unreferenced connections are excluded. Removing every `@` reference restores connection-based input collection.
+- Also verify config nodes created by the agent through `canvas_create_config_node` (prompt without `@`) send connected reference images, and run one generation in image, text, video and audio modes.
+
 ## v0.18.2 — v0.14.1-style batch interactions
 
 - v0.14.1-style batch lines: generating three images should connect the root to all three real placements, including its primary mirror. Lines follow node movement, hide on collapse, and support selection, deletion and manual reconnection. They persist in `connections` with `kind: "batch"`; deleting a line must survive reopening without detaching the placement or changing linked movement. Reconnection must not create duplicate lines or extra model references. Previously saved batches without expansion metadata initialize their lines once; existing v0.14.1 lines and intentional deletions are preserved.

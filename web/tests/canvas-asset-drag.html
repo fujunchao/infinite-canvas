@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>资产图片拖动回归</title>
+    <style>html, body, #root, .ant-app { height: 100%; margin: 0; }</style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      import React from "react";
+      import { createRoot } from "react-dom/client";
+      import { MemoryRouter, Routes, Route } from "react-router-dom";
+      import { AppProviders } from "/src/components/layout/app-providers.tsx";
+      import UserLayout from "/src/layouts/user-layout.tsx";
+      import CanvasPage from "/src/pages/canvas/project.tsx";
+      import { useCanvasStore } from "/src/stores/canvas/use-canvas-store.ts";
+      import { useAssetStore } from "/src/stores/use-asset-store.ts";
+      import { useThemeStore } from "/src/stores/use-theme-store.ts";
+      import { uploadImage } from "/src/services/image-storage.ts";
+      import i18n from "/src/i18n/index.ts";
+      import "antd/dist/reset.css";
+      import "/src/styles/globals.css";
+
+      if (location.hostname !== "127.0.0.1" || location.port !== "43182") throw new Error("只能在独立回归端口运行");
+      await Promise.all([useCanvasStore.persist.rehydrate(), useAssetStore.persist.rehydrate()]);
+      await i18n.changeLanguage("zh-CN");
+      useThemeStore.setState({ theme: "dark" });
+      if (new URLSearchParams(location.search).has("reset")) {
+        const image = await uploadImage(new Blob(['<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#41796a"/><text x="160" y="100" text-anchor="middle" font-size="40" fill="white">ASSET</text></svg>'], { type: "image/svg+xml" }));
+        const now = new Date().toISOString();
+        useAssetStore.setState({ hydrated: true, assets: [{ id: "fixture-asset", kind: "image", title: "资产拖动回归图", coverUrl: image.url, tags: [], createdAt: now, updatedAt: now, data: { dataUrl: image.url, storageKey: image.storageKey, width: image.width, height: image.height, bytes: image.bytes, mimeType: image.mimeType } }] });
+        useCanvasStore.setState({ hydrated: true, projects: [{ id: "asset-drag", title: "资产拖动回归", createdAt: now, updatedAt: now, nodes: [], connections: [], chatSessions: [], activeChatId: null, backgroundMode: "lines", showImageInfo: false, viewport: { x: 0, y: 0, k: 1 } }] });
+      }
+      const h = React.createElement;
+      createRoot(document.getElementById("root")).render(h(AppProviders, null, h(MemoryRouter, { initialEntries: ["/canvas/asset-drag"] }, h(UserLayout, null, h(Routes, null, h(Route, { path: "/canvas/:id", element: h(CanvasPage) }))))));
+    </script>
+  </body>
+</html>
